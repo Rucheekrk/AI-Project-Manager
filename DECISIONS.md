@@ -11,6 +11,58 @@ considered and not chosen, and current status.
 
 ---
 
+## Pending meetings: passive "needs attention" notice instead of an automatic pop-up (2026-10-20)
+
+**Problem (user feedback)**: opening Task Manager auto-opened the "Review Proposed Meeting" dialog whenever a
+meeting was pending (originally the "pop up and ask for approval" step). It reappeared on every visit, including
+for people who deliberately do not want to resolve attendee emails yet - nagging, and shown on tabs unrelated to
+meetings.
+
+**Change** (frontend only): removed the automatic dialog entirely. The review dialog now opens only when someone
+clicks **Review** on a meeting. Pending meetings are surfaced where they belong, in the Meetings tab, without
+interrupting anyone:
+- an amber notice at the top of the Meetings tab ("N meeting(s) need your approval", "nothing is scheduled until
+  you approve it... or leave it pending", plus how many attendees have no email on file);
+- on the meeting card, which attendees couldn't be matched to an email, with an "add them in People" link that
+  switches to the People tab;
+- the Meetings tab badge (count of pending) and the card's "Pending approval" status are unchanged.
+Leaving a meeting pending is a legitimate choice: nothing re-prompts, and nothing is created until approval.
+
+**Verified in the real browser**: loading Task Manager (any tab) opens no dialog; the Meetings tab shows the notice
+and the unresolved names; the People link works; Review opens the dialog only on click; Decide later leaves the
+meeting pending with the notice intact.
+
+---
+
+## Task Manager split into tabs: Tasks | Meetings | People (2026-10-20)
+
+**Why**: the page was one long scroll (stats, tasks, meetings, people). User asked for a tab bar so each
+section is its own view.
+
+**What changed** (frontend only, no backend change):
+- New shared `components/Tabs.tsx` (accessible tablist, attention badges, scrolls sideways when narrow) - built
+  generic so the planned Project Registers page (RAID | RACI) can reuse it.
+- Active tab lives in the URL (`?tab=meetings|people`; Tasks is the default and omits the param), so refresh and
+  shared links keep it, same pattern as `?project=`.
+- **Tasks tab**: the stat cards, Export to Excel, Board/List toggle, and the task view. **Meetings tab**: the
+  Schedule Meeting button and the list. **People tab**: the people panel.
+- Project-level actions (Jira project key, Delete project) moved up beside the project selector so they show on
+  every tab instead of belonging to the task toolbar. The Activity feed stays on the right of every tab.
+- **Badges** (live, no reload): Tasks = possible duplicates to review, Meetings = meetings awaiting approval,
+  People = people with no email on file. `PeoplePanel` got an optional `onPeopleChange` callback so its edits
+  update the badge; the page keeps its own copies of meetings/people only for the badges.
+- ~~The unprompted "review proposed meeting" popup is unchanged~~ **Superseded the same day**, see the next entry.
+
+**Verified in the real browser** (demo project, since deleted): all three tabs render only their own content;
+badges appear for seeded data and clear on resolving a duplicate (Keep both), a missing email, and rejecting a
+meeting; reload keeps the tab; no console errors. Not done: the app's fixed sidebar makes the whole UI cramped at
+phone width (pre-existing, not part of this change).
+
+**Ops**: rebuilt only the frontend with `docker compose up -d --build --no-deps frontend`, so the API and database
+containers were not recreated this time (unlike the earlier rebuild that restarted everything).
+
+---
+
 ## Gate model comparison: stronger models did NOT beat gpt-4o-mini (2026-10-19)
 
 **Question** (from a side-chat suggestion): would a stronger model make the gate's judgment calls better?
