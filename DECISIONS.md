@@ -13,6 +13,28 @@ considered and not chosen, and current status.
 
 ---
 
+## People edits the roster, Capacity analyses it (2026-10-30)
+
+**Why.** Workspace > People and Hours > Capacity both listed the same people and both edited weekly capacity and skills, so one fact could be
+changed in two places. Kept both screens, gave each one job (merging was rejected: the roster belongs with meetings, the workload with hours;
+deleting Capacity would lose the free-hours view and the screen matching the chat answer).
+- **People = the only place to edit** who is on the project, role, email, weekly capacity and skills. It now links to Hours > Capacity.
+- **Capacity = read-only analysis**, with links back (People for capacity, Plan for tasks): a summary strip (team capacity, planned work, free,
+  over-allocated people, needs setup), a person-by-week grid of hours / capacity, and a "needs setup" list (no capacity set; open tasks with no
+  estimate or no due date, named, with owner and reason).
+- **Grid rule** (`compute_availability`, `apps/utils/hours.py`): weeks follow the project's week start. A week already over shows the hours LOGGED
+  in it ("actual"); the current and later weeks show PLANNED hours. The current week's planned hours start today, so its capacity is only the days
+  inside the window; hours already logged that week are in the tooltip but NOT added, to avoid a whole week of logged hours against a partial
+  week of capacity. Cell colour: over = above 100% of that week's capacity, "full" = 90% or more; the cell also carries text for screen readers.
+- **Unchanged:** the per-person totals (`capacity_in_window`, `planned_load_in_window`, `available_hours`) and so the chat answer. Added fields:
+  `weeks`, `over_weeks`, `summary`, and `task_id` on unknown items.
+- **Seen on forloop:** Priya Patel is over capacity (41.5 h planned against 8 h on Friday 30 Oct, 67.6 of 40 the next week): tasks due this
+  week still have hours left, and late work is assumed to land in the next five working days (existing rule). That is a real finding, not a bug.
+- **Not done:** planned load is still spread evenly (no day-level scheduling), no leave or holidays, and logged hours for the current week are
+  not compared with its capacity. Tests: 338 passing (2 new in `tests/unit/test_hours.py`).
+
+---
+
 ## Docs becomes a Guide; Feedback removed (2026-10-30)
 
 **Why.** Feedback was a "coming soon" placeholder with no form or storage, which looks unfinished in a demo. Docs was three stale blurbs (it still
