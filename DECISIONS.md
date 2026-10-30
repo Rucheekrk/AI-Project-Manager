@@ -9,6 +9,783 @@ explaining the system to someone else.
 Newest entries at the top. Each entry: the decision, the reasoning behind it, what was
 considered and not chosen, and current status.
 
+
+
+---
+
+## Timesheets arrive by folder, not by upload button (2026-10-30)
+
+**Why.** The manager's direction: no upload buttons for timesheets. Timesheets are produced by other people, so they are PULLED IN
+(the plan is the project manager's own data, so it is loaded once and edited in the app; see the entry below). **Decided (user), the
+"go with 1 + 2 + 4 and all six defaults" choice:**
+- **Where:** a folder INSIDE the project, `timesheets/<project-id>/`, created for every project with tasks when the API starts. The API
+  container already mounts the whole project folder, so no new mount and nothing else on the laptop is visible to it. `timesheets/` is
+  gitignored (client data stays off the remote). Subfolders `processed/` and `needs-review/` hold what was handled. A file is never
+  overwritten when moved; a name clash gets a time suffix.
+- **How:** a background thread in the API process looks every 10 s (`TIMESHEET_POLL_SECONDS`), waits until a file has stopped changing
+  (2 s, size and times rechecked) so a half-copied file is never read, skips dotfiles, `~$` lock files, `.tmp/.part/.download` and symlinks. It
+  runs only while the API container runs; after a restart it catches up on whatever is in the folders. `TIMESHEET_WATCH=0` switches it off.
+  It is automatic pickup, NOT a fifth agent: no LLM decides anything beyond what the import already did (column mapping and task matching).
+- **Which project:** decided by the FOLDER, never by file contents (the "Project" column is ignored). So a file dropped in the wrong folder lands
+  in the wrong project; the file-name rule is the guard against that.
+- **Auto-apply rules (1 + 2 + 4), all must hold, otherwise the file is HELD and nothing is written:** (1) every person in the file is on the
+  project's people list; (2) the file name starts with the project id, and not with another, longer project id (`forloop-x.csv` is not for a
+  project `for`); (4) the lines are not clearly about different tasks (3 or more task-named lines and none match a task of this project). Plus every
+  row readable. A held file moves to `needs-review/` with the reason and shows **Review** in the Incoming timesheets card, which opens the same
+  review screen the old upload used; confirming applies it and moves the file to `processed/`.
+- **Check these matches (default 1):** applied files are NOT held for guessed task matches; instead the lines whose task was only suggested, guessed
+  by the model or not found are listed with a task dropdown. Picking another task MOVES that person's hours for that label (totals do not change;
+  `POST /hours/imports/{id}/reassign`; Undo still restores everything, previous values are kept in the import's summary).
+- **Same file twice:** content hash against applied imports, status "Already imported", nothing written. Same person + week + task in a different
+  file still REPLACES (existing rule). Undo of a picked-up file works like any import. A file that cannot be parsed, is over the size limit or hits an
+  unexpected error is held or marked failed and never stops the next file.
+- **UI:** the "Upload a timesheet" card is gone. Hours > Timesheet now has **Incoming timesheets**: the folder path, "last checked N s ago",
+  the recent files with Imported / Needs review / Already imported / Failed, Undo, Review, and the Check these matches table. The Hours page
+  polls every 5 s and reloads the report and grid when a file lands, so a dropped file shows up without a refresh. The hand-entry grid stays.
+  The plan upload button stays (first upload only).
+- **Kept:** the upload API endpoints still exist (tests and the plan import use them); only the timesheet button is gone. There is no hidden
+  manual upload.
+- **Golden data:** the `--existing` loader also moves everything in `timesheets/forloop/` to `timesheets/_archive/`. The demo step is now
+  `cp datasets/hours/forloop/forloop-timesheet-week5.csv timesheets/forloop/` (the name already starts with `forloop`). Verified live: the
+  file was picked up in under 30 s, 463 h logged, 237 h left, forecast 737 h (37 h over), 10 lines in Check these matches; Undo back to 363;
+  a file with an unknown person was held, reviewed in the UI, applied; reset restored 363 / 346 / 709. Also rehearsed on a throwaway project.
+- **Risks / not done:** auto-apply can guess a task wrong (that is what the check list and Undo are for). The watcher lives in the API process
+  (stops with Docker or the laptop; one process only, so running two API replicas would double-read, which the duplicate check absorbs).
+  No access control on the folder (anyone with the laptop can drop a file); no record of WHO dropped it. The `ensure_folders` pass runs at start and
+  on each scan for projects that exist then; a project created after start gets its folder within one scan. Windows/network-share folders and
+  Clarity/Jira worklog pulls are not built. Tests: 336 passing (21 new in `tests/db/test_timesheet_folder.py`).
+
+---
+
+## The plan is maintained in the app: baseline, change history, Plan view (2026-10-30)
+
+**Why.** The project manager owns and maintains the plan; an Excel master re-read every few hours would make two sources of truth (edits
+overwritten, tasks matched by fuzzy name so a rename looks like a delete plus an add, history unreliable). Rule used: data other people or
+systems produce (timesheets) is PULLED IN; data the project manager owns (the plan) is loaded ONCE and edited here. **Decided (user):** upload
+only the first time, no re-import, baseline and change history, Export to Excel as the one-way way out.
+- **Where:** Workspace > Tasks, views **Plan | Board** (Plan default). Plan REPLACES List (same table, every List column and filter kept, plan
+  columns added; the "Updated" column was dropped to make room). Hours > "By task" is removed; its job moved into Plan (estimate, weeks,
+  hours still needed, the needs-attention filter). The Hours Overview "Needs attention" box stays and links to the plan.
+- **First upload only:** `Upload plan` appears only while the project has no plan (`plan_summary.has_plan` false). Enforced on the server: a plan
+  preview on a project that already has one is a 409. Undoing the first import returns the project to "no plan".
+- **Baseline:** `tasks.baseline_*` and `project_hours_settings.baseline_set_at`, set automatically by the first plan import (or by "Set baseline" on
+  a project with a plan but none), ONCE per project. A task created after that moment is "added after baseline" (by time, so tasks a document run
+  creates later count as scope growth too); a task removed through the plan keeps its baseline hours in the baseline total. The strip above the
+  table: "Baseline 29 Oct: 612 h planned, now 620 h (+8 h), 1 task added". The Baseline column shows the original estimate and the change;
+  changed weeks show a marker with the original weeks on hover.
+- **Change history:** `plan_changes` (what, task, from, to, when, source). Logged: estimate, start / finish week, phase, hours still needed, task
+  added / removed, budget, kickoff, baseline set, plan imported / undone. A plan import is ONE line, not one per task. Unchanged values are not
+  logged. It records WHEN and WHAT, never WHO: no sign-in yet. Tasks created by a document run after the baseline are listed from the tasks
+  themselves.
+- **Add / remove:** add by hand (duplicate names refused, owner joins the roster like in the pipeline); remove is a soft removal with a
+  one-line confirmation that says how many logged hours stay in the project total as hours not on a task. Dependency links go with it so nothing
+  shows "unknown task". Its Jira issue is NOT touched. Phases from the plan file are now saved (they were dropped) and editable.
+- **Export to Excel** is the one-way way out: the Workspace button now gives a workbook of Plan (all task columns plus phase, weeks, estimate,
+  baseline, change, logged, left), Summary and Change history. Text cells are plain text, never formulas. The Sync/Reporting agent's own
+  `generate_report` is untouched.
+- **Chat:** new tool `get_plan_changes`: baseline vs now, tasks added and removed, and only the changes made AFTER the baseline, with units
+  ("week 6 to week 7", "48 h to 56 h"; the first version said "from 6 hours to 7 hours" about a week number, caught in a real chat test and fixed
+  in the tool, not the prompt).
+- **Golden data:** the `--existing` loader also clears the plan history and baseline, restores tasks removed in a demo and deletes tasks added by
+  hand in the Plan view, so a reset always ends in the same state. forloop after a reset: 612 h baseline = 612 h now, 22 planned tasks in 3 phases
+  plus two outside the phases, 363 / 346 / 709 unchanged. Verified by adding a task, editing an estimate, removing the task, then resetting.
+- **Not done / open:** (the timesheet folder pickup was built the same day, see the entry above.) Re-baselining (a second baseline) is not offered. The Extractor still
+  accepts a second SOW; only the plan FILE is first-upload-only. Tests: 315 passing (17 new in `tests/db/test_plan.py`).
+
+---
+
+## Settings page: seven additions, and why week start is a PROJECT setting (2026-10-29)
+
+**Added** (user approved a list of five and asked for two more): the Default project text now says Workspace, Registers, Hours and Extractor
+(it was out of date); agent activity panel shown or collapsed (an existing preference, now reachable from Settings); table rows
+comfortable or compact; "show how the assistant got each answer" in Chat (off by default); a display name for the sidebar; date format;
+week start. The page is grouped: Appearance, Workspace, Chat, Hours. All are per-browser (localStorage) except week start.
+- **Table rows:** `data-density="compact"` on `<html>` (set before first paint by the inline script in `layout.tsx`, like the theme) and one
+  un-layered CSS rule that tightens every table cell's padding (8 px less per row on the Workspace list).
+- **Chat sources:** the API already returned the tools used; `ChatMessage.trace` now keeps them and `lib/toolLabels.ts` maps tool names to
+  client-friendly words ("Hours", "SOW and meeting minutes"). Only answers received in the current session carry it: saved history stores
+  no trace. An unknown tool is left out rather than shown by its internal name.
+- **Date format:** every displayed date now goes through `lib/format.ts` (`formatDate`, `formatDateTime`): Browser default, DD/MM/YYYY,
+  MM/DD/YYYY, YYYY-MM-DD, or "29 Oct 2026". NOT affected, and the page says so: native calendar pickers (they follow the computer's language
+  setting) and dates inside the assistant's chat answers or backend notes (they are ISO text from the server).
+- **Week start is a per-project setting, not a browser preference.** Hours are stored per week, so two people with different week starts on
+  the same project would file the same hours into different weeks. It is `project_hours_settings.week_start_day` (0 Monday ... 6 Sunday;
+  the UI offers Monday, Sunday, Saturday), default Monday, so every existing number, including the golden forloop ones, is unchanged. It is
+  threaded through `week_start`, `weeks_elapsed`, the planned-finish Friday, availability, the timesheet, the import parser (flat, grid and
+  matrix) and the report's default date. Changing it re-files every logged week in one transaction: each stored week moves to the new week
+  that contains its middle day, so "the week of 19 Oct" stays the week of 19 Oct, the mapping is reversible, and no hours are lost or merged.
+  Control: Settings > Hours only, with a project picker in the row (it starts on the default project). It was first ALSO in Hours > Overview
+  next to budget and kickoff; removed the same day: it is set once, does not change any number on that page, and two places for one
+  setting was confusing. The picker is what makes Settings enough: before it, the row could only edit the default project.
+  Working-week maths (Mon-Fri) does not depend on the choice: forloop's forecast, due-by-now and free hours are identical for all three.
+  **Known limit:** undoing an import that was applied before a week-start change puts its overwritten rows back under the OLD week
+  convention; change the week start before importing, not between an import and its undo.
+**Verified:** in the browser on the disposable copy (not the live forloop): Sunday moved all five logged weeks onto Sundays with 463 h and the
+737 h forecast unchanged, Monday restored them; display name and its first letter updated the sidebar; compact rows measured 8 px
+tighter; the chosen date format showed on the Workspace "Updated" column; the activity panel stayed collapsed; the sources line appeared
+under a real answer. Tests: 298 passing, including the week-start cases for Monday, Saturday and Sunday.
+
+---
+
+## Click-to-edit no longer moves the table (2026-10-29)
+
+**Bug.** Clicking a cell to edit it shifted the column and the rows, and the page itself jumped sideways. Measured on the Hours capacity
+table: the edited column grew from 127 to 137 px and the other columns shrank, and an input taller than its text made the row taller;
+once the page was taller than the window a scrollbar appeared and pushed the whole table left (about 9 px). It happened in every table
+with click-to-edit cells: Workspace tasks, Hours, RAID, Deliverables, RACI, and the Jira key in the Workspace header.
+**Fix, and why this one:** a shared wrapper, `frontend/components/InlineEditShell.tsx`. The read-only content STAYS in the layout (hidden
+while editing) and the editor FLOATS over it (absolutely positioned, vertically centred, at least as wide as the cell, anchored left,
+right or centre), so the cell, row, column and table cannot change size whatever the editor looks like. Used by `TextCell`,
+`InlineEditCell`, the dependency picker, `NumberCell`, `SkillsCell`, the RACI role picker and `ProjectSettings`. Two supporting changes:
+editors are focused with `focus({ preventScroll: true })` (`autoFocus` made the browser scroll the table sideways to reveal the input),
+and `html { scrollbar-gutter: stable }` reserves the scrollbar's width so a page that becomes taller never shifts sideways.
+**Rejected:** giving the edit control exactly the same fixed width and height as the text. It fails whenever a value is longer than the
+control (a title, a list of skills), and it would make every row taller to fit the control. **Verified** by measuring row heights, column
+widths, table position and page height before and after the click, in the browser: no change for the Hours capacity and skills cells,
+Workspace owner / status / priority / deadline / blocker / add-dependency, a RACI cell, RAID title and owner, Deliverables title and
+deadline, and the Jira key chip. Not covered by the wrapper on purpose: the add-person and add-item forms, which open as new panels.
+
+---
+
+## AI Chat: six demo prompts, checked against forloop, and the bugs checking them found (2026-10-29)
+
+**Change.** The New Chat button now sits below and to the left of the input bar, and the empty-chat screen offers six prompts, one per
+topic, replacing four generic ones (one of which named vmware-sim). They name `forloop` explicitly because it is the golden dataset
+(`ChatWindow.tsx`, `SUGGESTED_PROMPTS`): (1) status summary, (2) hours left and on track, (3) tasks over their estimate, (4) who is free for
+QA or backend work in the next 4 weeks, (5) what the Sales Trends view depends on and whether that is finished, (6) what the SOW says about
+the go-live date and concurrent users. **How they were chosen:** eight candidates were run through the real chat and each answer compared
+with the database; the six kept were identical across two runs and match the data (7 completed / 7 in progress / 10 not started; 337 h
+left and status Watch; VPN 16 vs 12 h and QA plans 14 vs 12 h; David 64 h, Marcus 140 h, Elena 98 h free; depends on the completed ETL
+pipeline; go-live end of Week 8 and 200 concurrent users). **Rejected:** "which forloop tasks are synced to Jira" (it listed two of five
+and guessed at the rest) and "what is blocked in forloop" (the only blocker is text on a task whose status is in progress, so the answer is
+muddled); both need the underlying data or tools to be better first. The answers hold while forloop is in the state the loader leaves it
+in (and the free-hours numbers shift with today's date, since planned work is spread from today).
+
+**Bugs found by checking them, all fixed.** (1) The SOW had no search chunks, so Chat said it had no details on go-live or users: documents
+stored before search existed were never chunked, and re-submitting them did nothing. `upsert_source_document` now chunks a document that
+has none, and `scripts/backfill_document_chunks.py` fills every such document (one was missing: the forloop SOW). (2) The dependency tool
+returned task ids, so the chat printed raw ids; it now returns names, owners and statuses of both sides. (3) The hours answer called the
+project "at risk" or "on track and Watch": the schedule value and the status word shared a label. The schedule value is now `in_line`, and
+the hours report carries a one-sentence `burn_check.summary` ("Watch: work done is in line with the plan, but the forecast is 9.0 h over the
+budget.") that the chat manifest tells it to use as written. (4) The project rollup had no not-started count, so the chat computed it; it
+is now `not_started_tasks`. 276 + 4 new tests passing.
+
+---
+
+## Hours: design, synthetic forloop data, and the build (2026-10-29)
+
+**Goal.** AI Chat should be able to answer "how many hours are left in this project?" and "who is available for this
+engineering work?". Nothing in the app tracked hours before (the Chat manifest says so; the earlier note in the document-search
+entry deferred it as "a separate design conversation"). This is that conversation. Built the same day: see "What was built" at the end of this entry. Still LOCAL and UNCOMMITTED.
+
+**Three inputs, three sources.** Budget (SOW or commercial doc), estimated hours per task (project plan), actual hours
+(timesheets). The plan holds estimates; actuals almost never live in it. "Hours left" is budget minus actuals; with no actuals the
+Chat must say which number it is giving (budget minus planned, or open estimated work), never pass one off as the other.
+
+**Decided (user confirmed).**
+- One standard format that clients adapt to, like Jira, not per-client tuning. Time is kept weekly; hours are entered against a
+  task PICKED from the project's task list, plus an "Other" bucket, so no free-text matching is needed for hours typed in the app.
+- **Upload is the main way in, typing is the fallback** (retyping an existing timesheet is redundant and error-prone). Upload lives
+  on the Hours page, NOT in the Extractor / 10-node pipeline: the pipeline extracts tasks from narrative text, reads no Excel, and a
+  timesheet row is not a task. The same import also reads the project plan for estimates.
+- Import steps: code finds the header and layout (one row per entry, weekly grid, person-by-week matrix); an LLM only PROPOSES the
+  column mapping; a person confirms in a preview; hour values are read from the cells by code, never by the LLM, and each entry keeps
+  its sheet and row. Free-text task names go through the existing Match logic and wait for confirmation when unsure; unmatched
+  hours go to "Other" so the project total stays right. Re-uploads REPLACE by (person, week, task) instead of adding, and every
+  import is tagged so it can be undone.
+- Metrics: task remaining = estimate - actual (0 if complete); overrun flagged; hours left in budget = budget - all actual hours;
+  forecast = actual + remaining on open tasks; ahead/behind = budget - forecast; burn check. Open tasks with no estimate are left out of
+  the forecast and the Chat says how many.
+
+**Defaults, not yet explicitly confirmed.** (a) "Hours still needed" (estimate to complete) asked only when an open task reaches its
+estimate, so an overrunning task is not shown with 0 left; (b) storage: `estimate_hours` on `tasks`, a small budget table (project
+total first, by role later), a `time_entries` table whose task link is optional (rows with no task still count toward the project
+total), `weekly_capacity_hours` and skills on `project_people`; totals are computed, never stored; (c) availability = weekly capacity
+- remaining hours of open tasks spread evenly to their due dates, tasks with no estimate or date shown as unknown; (d) build order:
+estimates + budget + hours entry + the two Chat tools, then capacity and availability, then plan/timesheet import and SOW budget
+extraction; (e) UI: an "Hours" sidebar page (Overview, Timesheet, By task, Capacity), plus Estimate/Logged/Left columns in Workspace
+Tasks, capacity and skills in People, an "Hours left" card on the Dashboard. A Jira-worklog pull is a possible later path (the Jira
+connection only creates issues today).
+
+**Synthetic data.** `datasets/hours/forloop/` (generator: `scripts/generate_forloop_hours_dataset.py`, README inside): a plan, a flat
+CSV, a weekly-grid workbook, a person-by-week summary and `forloop-hours-expected.json`, all views of one table of hours, consistent
+with the Week 3 sync minutes. Checked by re-reading the generated files cold: flat (258 h) + grid (105 h) = summary = 363 h.
+
+**Burn check (decided by the user: compare work DONE with work DUE BY NOW, with partial credit).** The first version compared
+the share of the budget used with the share of task estimates completed, which read badly behind on the synthetic project (51.9%
+used, 29.4% done) although the plan was on schedule. Now: a task counts as done in proportion to its hours (logged / (logged +
+remaining), capped at 90% until someone marks it completed) and as due in proportion to how much of its planned weeks (start..finish
+week from the plan, counted from the kickoff date) have passed. On schedule if done >= due - 5 points; the forecast is "within",
+"tight" (over 95% of the budget) or "over"; status is on_track / watch / at_risk (behind AND over). End of Week 4 on the forloop data:
+51.9% of budget used, 44.3% due, 43.1% done, forecast 709 h vs 700 h -> schedule on track, cost over, status Watch. Checked by hand
+from the plan (due 271.3 of 612 estimated hours, done 263.6), not only by the code.
+
+**What was built (the user asked for every step in one go).**
+- Storage (`apps/db/hours_db.py`, `ensure_hours_schema` at startup): `tasks.estimate_hours / plan_start_week / plan_finish_week /
+  hours_still_needed`; `project_people.weekly_capacity_hours / skills`; `project_hours_settings` (budget, kickoff date, per-role
+  budgets); `time_entries` (task link optional, ON DELETE SET NULL, unique per project + person + week + task so imports REPLACE);
+  `hours_imports` (previews, applied imports with what they overwrote, for undo). Nothing computed is stored.
+- Rules (`apps/utils/hours.py`, pure functions): remaining, forecast, burn check, availability (capacity for the working days in a
+  window minus remaining hours spread evenly from today to each task's due date, due = Friday of the planned finish week or an ISO
+  date in the deadline text; unknowns listed, never guessed). The Chat tools, the Hours page and the task list all use it.
+- Import (`apps/utils/hours_import.py`, `/projects/{id}/hours/import/preview`, `/hours/imports/{id}/confirm|undo`): layouts one row per
+  entry, weekly grid per person, person-by-week matrix, and the plan (tasks, estimates, weeks, budget, kickoff). Code reads every number
+  from its cell and keeps the sheet and row; an LLM only proposes columns when headers are unrecognised and the user can override.
+  People: exact, "Last, First", initials. Tasks: exact text after expanding abbreviations, then embeddings, then ONE batched LLM check
+  that may only pick among the closest tasks or say none; plan mode is stricter (same work, not related work; one task per plan row).
+  Uncertain matches are shown as "check" and the user confirms; anything unmatched counts as Other so project totals stay right.
+- Budget from the SOW (`apps/utils/hours_budget_ai.py`): kept only if the quote is verbatim and contains the number; never converts a
+  weekly availability or days into a budget; the user presses "Use this number".
+- AI Chat: tools `get_project_hours` and `find_available_people`, manifest rules to report the numbers as returned and always state the
+  caveats (no budget, tasks without estimate, tasks over their estimate, no capacity). Checked with the real chat on the demo project:
+  337 h left, Marcus Chen 132 h logged, 28 h left on Sales Trends, Marcus and Elena free for backend work, all as the tools returned.
+- UI: sidebar "Hours" (Overview, Timesheet with upload + hand entry + the "hours still needed" prompt, By task with plan upload,
+  Capacity with who-is-free search); Estimate / Logged / Left columns in Workspace Tasks; capacity and skills in People; "Hours left"
+  cards on the Dashboard. Only difference from the plan: the task list repeats the one-line remaining rule in TypeScript
+  (`TaskTracker.remainingFor`) to update a row without a refetch; if the rule in `apps/utils/hours.py` changes, change it there too.
+
+**Measured.** Task matching on the synthetic data (`eval/nodes/eval_hours_import.py`, real LLM): embeddings alone 30 of 36 labels
+right, 296 of 363 h (82%); with the model check 32 of 36 labels, 336 h (93%). The misses are the genuinely ambiguous ones (a
+"Delivery management" label attached to the final-delivery task, 23 h; three VPN follow-ups left as Other). End to end through the
+real API (`scripts/seed_forloop_hours_demo.py`, demo project `forloop-hours-demo`): 363 h imported exactly, 20 of 24 tasks with exactly
+the right hours, 29 h on a different task, forecast 693 h against an expected 709 h. Every one of those matches is marked "check" in
+the review step; the limits are one synthetic project, one author for data and key, and matching judged against that key.
+Tests: 275 passing (72 new, incl. the three layouts, replace-not-add, undo, merge, deletion, chat tools).
+
+**Bugs found by running it on the data, and fixed.** (1) Deleting a task turns its hour entries into "Other" entries, which collided with
+existing "Other" entries for the same person and week, so a project with hours could not be deleted; hours are now removed first.
+(2) Merging two duplicate tasks left the duplicate's hours behind on a deactivated task; they now move to the survivor (summed where the
+same person and week exist on both) and the duplicate's estimate fills blanks. (3) The first plan matching reused the timesheet prompt
+and attached the project-management row to an unrelated task; plan rows now use their own stricter prompt.
+
+**Not built / open.** Per-role budgets are stored and shown but no role-level forecast; no Jira worklog pull (the Jira connection still
+only creates issues); availability does not read Google Calendar free/busy; "who is available" matches role and skill words only (no
+"has done similar tasks" ranking); the burn check assumes plan weeks come from the plan or are entered by hand, and says so when they
+are missing; (resolved the same day, see below) the burn check no longer uses today's date.
+
+**Loaded into the live `forloop` project (user request, 2026-10-29: "one golden data set I can run and show to clients").** The
+build and its bugs were first found on a disposable copy (`forloop-hours-demo`) so the live project could not be damaged; the user
+then asked for forloop itself, so `python -m scripts.seed_forloop_hours_demo forloop --existing` (in the api container) loads the
+synthetic hours on top of the live tasks. It is re-runnable before every demo and always ends in the same state: it clears only hours
+data (entries, imports, settings, estimates), reloads the plan and both timesheets through the real import API, and never deletes a
+task or touches a deadline or owner. Three things it DOES change on forloop, deliberately: (1) task statuses are set to the end-of-Week-4
+state from the Week 3 minutes (13 changed, plus the project-management task the plan creates; the originals, 22 "not_started" and one
+blank, are in `logs/forloop-before-hours-*.json`, which is git-ignored); (2) blank roles are filled from the SOW's Team list, and
+capacity and skills are set (capacity and skills are invented); (3) the script plays the REVIEWER: where the importer's proposed task
+for a label differs from the answer key (5-6 of 43 flat-file rows) it applies the key's task, as a person correcting the "check" rows
+would; without that step the importer alone reaches 93% of hours (see Measured). Result on forloop: 363 h logged, 346 h open, forecast
+709 h vs the 700 h budget, burn check Watch (on schedule, 9 h over), all equal to `forloop-hours-expected.json`.
+**Burn-check date:** it is now anchored to the end of the latest week with hours logged (never later than today), not to today, so the
+golden numbers do not drift with the calendar; a note says so when nothing has been logged for over a week (otherwise a team that
+stopped logging would look fine). An explicit `as_of` still wins. **Stored forloop deadlines, fixed on 2026-10-29 at the user's request** (the old values are in `logs/forloop-deadlines-before-fix.json`, git-ignored):
+"Deliver data mapping document" 2026-09-25 -> "end of Week 2"; "Coordinate user acceptance testing" 2026-09-07 -> "Week 7"; "Deploy the
+dashboard" 2026-09-25 -> "end of Week 8" (all three straight from the SOW's own wording, which the old date parser had turned into
+wrong dates); "Review VPN access resolution" "early next week" -> "early Week 4" (the Week 3 sync said "early next week"). The deploy
+task's owner stays blank on purpose: the SOW says "the team", not a person, and a made-up owner would become a person in the People list.
+**Demo plan (answer to "delete forloop or run one more doc?"): keep forloop, never delete it.** Live hours step: upload
+`datasets/hours/forloop/forloop-timesheet-week5.csv` (100 h, clear labels). Rehearsed on a copy: all 15 rows matched the right task with
+no corrections, and the numbers moved exactly as derived by hand (asserted in `tests/unit/test_hours.py`): logged 363 -> 463, left in
+budget 337 -> 237, remaining 346 -> 274, forecast 709 -> 737 (37 h over). Reset afterwards with the `--existing` command above. A live
+pipeline step (extract a document into tasks) should use a FRESH project id: forloop has Jira project FLP configured, and a run that
+creates tasks would create real issues in it (create-only); a fresh project has no Jira mapping, so Jira sync is skipped.
+
+---
+
+## Three pipeline bugs found while documenting the nodes, and fixed (2026-10-27)
+
+Found by RUNNING the code and reading the stored data while writing the node-by-node walkthrough, not by the tests (none
+covered these helpers). Fixed with regression tests that fail on the old code (24 failures) and pass on the fix. Full
+suite: 203 passed (58 new). Still LOCAL and UNCOMMITTED. **Decision (user): fix the code only; do NOT touch the wrong values
+already stored in the `forloop` project.**
+
+**1. Deadlines (`apps/utils/deadline.py`, `resolve_deadline`).** Any text containing a digit fell through to a fuzzy date
+parse that read the digit as a day of the current month, and "end of Week N" matched the "end of week" rule. Results:
+"Week 7" -> the 7th, "Q2 2026" -> 2026-02-27, "in 3 days" -> the 3rd, and "end of Week 2" and "end of Week 8" both -> the
+coming Friday. Stored evidence: in `forloop` two tasks due weeks apart both have 2026-09-25 and the Week 7 task has
+2026-09-07. **Fix**: a deadline becomes a date only if the text holds a real calendar date (ISO, "April 14", "14 April",
+"5/12/2026") or a relative word (today / tomorrow / next Monday / EOW / EOM). Plan positions ("Week 2", "Sprint 4", "Phase 2",
+"Q2") and durations ("in 3 days") keep their ORIGINAL wording; a real date beside a plan reference wins ("Week 6, May 12,
+2026" -> 2026-05-12, and the fuzzy parse now starts at the date so the "6" cannot leak into it). **Rejected: computing "Week N"
+from a kickoff date** - the SOW rarely states one, so it would be a guess; keeping the wording is honest and can be upgraded
+later. The deadline column is text and already held phrases such as "early next week".
+Trade-offs / my defaults: a bare "by 15th" and a month-and-year ("April 2026") also keep their wording; an explicit date
+now wins over a relative word ("next Monday, May 4" -> May 4); relative words are still resolved against the day the
+document is PROCESSED, not the meeting date (unchanged, still open).
+
+**2. Abbreviations (`apps/utils/abbreviations.py`).** Matching was case-insensitive for every entry, so the ordinary
+words "was" and "be" became "WebSphere Application Server" and "Backend" ("the test was completed" -> "the test WebSphere
+Application Server completed"); "Dr. Smith" would become "Disaster Recovery Smith". No stored task was affected yet.
+**Fix**: WAS, BE, FE, HA, DR, LB, IDE and SLA (entries that are ordinary words or titles in lower case) expand only when
+written exactly in upper case; everything else stays case-insensitive because people do type "k8s", "poc", "mvp".
+Trade-off: a lower-case "ha cluster" no longer expands to High Availability.
+
+**3. Blocker events (`apps/nodes/format.py`, `apply_task_updates`).** A "blocker" event only exists when the document gave
+no status (match.py's `infer_event_type` checks status first), yet the code wrote the event's (empty) status into the
+task, blanking it. Stored evidence: `forloop` "Review VPN access resolution" has a blank status next to its blocker text.
+**Fix**: set the status to "blocked" when the event has none (a status the event does state is kept). This follows the
+code's own comment ("mark task status as blocked") and the dashboard's existing rule that a blocker means blocked. **My
+default**: the alternative was to leave the status untouched.
+
+**Tests added**: `tests/unit/test_deadline_resolution.py` (43), `tests/unit/test_abbreviations.py` (13),
+`tests/db/test_blocker_update.py` (2). **Not done**: repairing the already-stored `forloop` rows (the user's call); the
+other open points listed in the walkthrough document (Planning's deadline is not stored, Sync / Reporting only creates Jira
+issues and never updates them, a document that yields no tasks is not saved).
+
+---
+
+## Finishing RAID: Excel export + AI "Suggest from documents" (2026-10-26)
+
+Part of "let's finish building RACI/RAID". Still LOCAL and UNCOMMITTED. Items marked **(my default)** are mine, for review.
+
+**1. Excel export (done).** `GET /projects/{id}/registers/export` -> one .xlsx: Summary, RAID log, Deliverables,
+"RACI - Deliverables", "RACI - Tasks". Confirmed items only (suggestions not yet reviewed are counted on the Summary
+sheet, not listed). Cell text that starts with `= + - @` is forced to plain text (formula-injection guard); "(R)" marks an
+*inferred* Responsible (the task owner). Button "Export to Excel" next to the project selector. 8 tests.
+
+**2. AI RAID suggestions (done, experimental).** Button "Suggest from documents (experimental)" ->
+`POST /projects/{id}/raid/suggest`. It reads only the project's stored documents it has not read yet
+(`source_documents.raid_scanned_at`; `force` re-reads all), one LLM call per document, and saves results as `suggested`
+(origin `agent`) with a verbatim quote as evidence. It only PROPOSES - nothing joins the log until a person accepts.
+Rules enforced in code, not just asked of the model: a quote that is not really in the document is dropped; probability
+and impact are kept only when that verified quote backs them, otherwise blank (the earlier decision: the assistant does
+not estimate them); items that restate an existing one of the SAME type, in ANY state including *rejected*, are skipped
+(so a rejection is remembered); a document the model failed on is reported and stays unscanned so the next click retries.
+10 tests with a scripted LLM.
+
+**Bug found by the eval, not by tests**: models wrap quotes in `"..."` and mark cuts with `...`; the first version
+treated every such quote as invented (0 of 4 verified). Fixed by stripping wrapper quotes/ellipses and requiring each
+remaining stretch to appear verbatim; a made-up quote still fails (tested).
+
+**Measured (eval/nodes/eval_raid_suggest.py; ONE synthetic SOW; real LLM calls).** Sections 7 (assumptions) and 8
+(dependencies) removed from the SOW; the 9 + 6 items in them are the key.
+- gpt-4o-mini (the app default): 4-9 items, 4 of 9 quotes verified, pooled recall 1/15 by the scorer.
+- gpt-4o: 5-8 items, erratic (found 1 assumption). gpt-4.1: 15-16 items, 15 of 15 quotes verified, steady across runs.
+- **The scorer undercounts.** compare.py's 0.6 title-similarity cutoff misses same-meaning pairs because SOW sentences are
+  long (scored 3/15 pooled). Reading each key item next to its closest extraction, ~6/15 were recovered in meaning
+  (API credentials, production environment, CSV datasets). The other ~9 ("Priya 20 h/week", "Stat Key API format will not
+  change", "third-party libraries are open-source", ...) are stated ONLY in the removed sections, so no extractor could
+  recover them: treat ~40% as a ceiling for this test, not a failure rate. Assumption vs dependency is also a judgment
+  call even for people ("NovaTech will provide credentials" is both).
+- On the full project (9 documents: SOW + 8 meetings) gpt-4.1 returned 80 suggestions with verbatim evidence; all 15 SOW
+  items from sections 7/8 appeared. Meetings gave real risks and issues (e.g. whitelist-approval delay, cache-key bug,
+  pie-chart label overlap). Risks and issues have NO answer key, so their precision is not measured.
+- **Known weaknesses (seen by reading the 80):** ~15-20 are really action items ("send Priya the endpoint list by April 2")
+  filed as dependencies/assumptions; the same fact appears under two types or in several meetings (dedupe is per type and
+  cuts only near-restatements); one "risk" quoted "Not a risk exactly, more of a watch item"; 80 in one review queue is a
+  heavy chore. A tightened "action items are tasks" rule moved dependencies 30 -> 24 and action-like titles 4 -> 3 on the
+  meetings: a small effect, so the review step is the real guard, not the prompt.
+
+**Choices (my default):**
+- Model: `RAID_AI_MODEL` env var, **defaulting to gpt-4.1 in docker-compose.yml** (set it empty to fall back to the app-wide
+  LLM_MODEL). Chosen from the numbers above; only this call uses it. It costs more per document than gpt-4o-mini.
+- Same-item cutoff `SAME_RAID_TITLE_MIN_SCORE = 0.65`: calibrated on those 15 items - distinct items score up to 0.53
+  against each other, the same item reworded 0.54-0.74. 0.65 sits above every distinct pair, so it hides only near-restatements;
+  a looser paraphrase simply appears for a person to reject (the safer direction). Limited to one document.
+- The four RAID definitions in `apps/utils/raid_ai.py` are written by Claude; the user's own wording is still wanted
+  (same open question as the deliverable definition).
+- Synchronous request: a project with 9 documents takes about a minute and a half with no progress bar.
+
+**Not done / open:** RACI role proposals from the text (A/C/I cues), the status report/snapshot, the Governance advisor,
+a way to review 80 suggestions faster (accept-all per type? filter by document?), running the extraction in the pipeline
+instead of on a click. The eval project `eval-vmware-sim` now holds 80 suggested items from the UI test.
+
+---
+
+## Deliverable-level RACI: investigation, scope NOT yet decided (2026-10-20)
+
+**Question**: RACI is per task today; PMs expect it per deliverable. Can deliverables be discovered automatically?
+
+**Finding 1 - correcting a first impression.** The synthetic SOW (`sow.txt`, the one the golden data is built from)
+has a clean numbered "4. DELIVERABLES" section: 11 items (4.1-4.11), each with an explicit Owner (some two) and
+Deadline, cited by number in its dependency section (8.4-8.6) and 21 times across the meeting minutes. A first
+assessment generalised from that one file and called discovery "the easy part". **That was wrong**: this dataset is
+scripted/synthetic (the user has pointed this out before for the matching evals too), and it is the only one with
+that structure.
+
+**Finding 2 - the other SOW-style inputs** (`datasets/inputs/input-sow-1..4`, `input-sow-forloop`): none has a
+numbered deliverables section. The word "deliverable" appears 0x in the forloop SOW (the closest to a real client
+SOW) and 1-3x elsewhere, only in boilerplate. The forloop SOW describes work as 3 phases with 17 bullets of the form
+"<Person> will <do X>" - owner inside the sentence, deadlines relative ("end of Week 2") or absent. Stable numbers
+like "4.6" mostly do not exist, so later documents would have to match deliverables by name.
+
+**Finding 3 - experiment (read-only LLM call, gpt-4o-mini, forloop SOW).** Asked "what a project manager would
+track as deliverables" it returned 13 items (including activities such as "End-to-End QA Testing" and "UAT
+Coordination", and omitting most of Phase 1: the ETL pipeline, CRM sync, data schema, VPN); asked for "only tangible
+outputs the client receives or signs off on" it returned 3 (Data Mapping Document, the Dashboard, Training Session and
+User Guide) and invented the client as the owner. Same document, a one-line wording change, 3 vs 13 items: what counts
+as a deliverable is a judgment, not an extraction fact.
+
+**Consequence**: AI discovery of deliverables is NOT the easy part and cannot be trusted without a definition and a
+hand-labeled evaluation set. The sensible shape is **manual-first**, like Registers v1: a deliverables register
+(number/name, owner(s), deadline, status), RACI rows by deliverable (per-task view kept as a secondary toggle; no
+real data uses task RACI yet - 0 rows - so nothing to migrate), and a practical way to create deliverables from what
+already exists, e.g. **promote an extracted task to a deliverable** (copies title/owner/deadline). A deterministic parse
+of a numbered DELIVERABLES section stays a cheap bonus for the rare SOW that has one. AI "suggest deliverables" comes
+later, behind a review step, once there is (a) a written definition of "deliverable" for this product and (b) a
+hand-labeled real-style SOW (the forloop SOW would take a person about ten minutes) to measure against.
+
+**Open**: the user's definition of a deliverable (tangible outputs only? named features/views? phases? milestones?);
+whether to build the manual-first register now. Rough size if built manual-first: a third to a half of Registers v1.
+
+---
+
+## Registers copy fix + open question: should Deliverables be its own tab? (2026-10-20)
+
+**Bug reported by the user**: the Deliverables tab always said "These are the rows of the RACI matrix", yet in a project
+with no deliverables that tab is empty while the RACI tab shows rows. Cause: with no confirmed deliverables the RACI tab
+deliberately falls back to the Tasks view, so the claim was false in exactly that state. **Fixed**: the Deliverables tab now
+says "Each one is a row in the RACI matrix (Deliverables view)" only when deliverables exist, and otherwise "Until you add
+some, the RACI matrix shows your tasks instead"; the RACI tab, when showing tasks because there are no deliverables, says so
+and offers an "Add deliverables" link. Verified in the browser in both states.
+
+**Open question (user asked "why is there a new tab for deliverables?")**: the third tab was part of the plan agreed before the
+register was built, but it was not discussed as a layout choice. Reasons for a separate tab: a deliverable is a register in its
+own right (number, owner, deadline, status, task count, a review queue for AI suggestions, task assignment); keeping it apart
+leaves the RACI tab a pure matrix. Alternatives not chosen yet: fold it into the RACI tab (a "Manage deliverables" panel above
+the matrix); or put it in Workspace next to tasks, since assigning tasks to deliverables happens there too. Waiting for the
+user's preference.
+
+---
+
+## Four follow-ups to the deliverables register: SOW RAID import, similarity hint, task assignment, AI suggestions (2026-10-20)
+
+**Status**: all four built, tested (125 pytest tests) and the two AI-assisted ones measured with new evals. Built in one go
+so they can be reviewed together; none is committed yet. **Every default marked "(my default)" below is awaiting the
+user's review.**
+
+**1. RAID items from a SOW's numbered Assumptions / Dependencies lists** (`apps/utils/sow_sections.py`; the pipeline step
+is now `sow_registers`, replacing `deliverables`, and also does the deliverables parse). Deterministic, no LLM. Results on
+the real files: synthetic SOW -> 9 assumptions + 6 dependencies; `input-sow-3` -> its 9 numbered assumptions (stops before
+its "Out of Scope" list); `input-sow-1` (bulleted PDF text), `-2` (PDF extraction with numbers split from their text), `-4`
+and forloop -> nothing, never a guess. Imported items are explicit statements in the document, so they join the log as
+**confirmed**, origin `document`, with a per-document key (`source_ref`) making re-runs idempotent while a different
+document's "7.1" stays separate. Title = first sentence (<=110 chars), full text in the description. A real `/run` of the
+synthetic SOW created all 15 and the 11 deliverables. Limit: only clean numbered lists; messy PDF layouts would need an LLM
+pass (not built).
+
+**2. "Similar to ..." hint when promoting a task to a deliverable.** Calibrated on a real run (35 tasks vs 11 deliverables):
+the 6 true restatements scored 0.71-0.85, the next score down was 0.66 -> `SIMILAR_DELIVERABLE_MIN_SCORE = 0.70`. But
+related sub-tasks ("Conduct smoke test post-deployment" ~ 4.8, 0.83; "Review and approve deployment runbook" ~ 4.9, 0.77)
+score as high as true restatements - the same limit as embedding-only task matching - so it is a **hint a person judges,
+never a block or a duplicate verdict**. Distinct deliverable titles never exceed 0.56 against each other, which sets the
+"same thing reworded" cutoff used when de-duplicating AI suggestions - **corrected after browser testing**: that was first set to
+0.75 from an *assumed* ~0.9 for rewordings and let two restated deliverables through; measured, the same deliverable with vs
+without its "(codebase + unit tests)" suffix scores 0.74-1.00 (distinct ones <= 0.56), so the cutoff is now **0.65**, in the gap.
+
+**3. Assign tasks to deliverables** (`tasks.deliverable_id`, `PUT /tasks/{id}/deliverable`, bulk assign, proposals). A task
+citing exactly one known deliverable number ("(Deliverable 4.6)") is assigned deterministically; the rest go to the LLM in
+batches of 50, which may answer "none" ("a wrong assignment is worse than none"). Proposals are NEVER applied silently:
+a review panel (Registers -> Deliverables -> Assign tasks) shows them with a per-row deliverable dropdown, and only
+**high-confidence ones are pre-selected**. Promoting a task also assigns it to the deliverable it created. Workspace list
+has a Deliverable column (dropdown) and board cards a number chip; the register shows a task count per deliverable.
+**Measured** (`eval/nodes/eval_task_assignment.py`; seeded project, golden SOW hierarchy as the answer key: 11 deliverables,
+72 subtasks + the 11 titles restated as tasks): the 11 restated titles 11/11; subtasks: assigned 60/72 (83%), correct
+among assigned 47/60 (78%), overall correct 47/72 (65%). **Confidence is a useful signal: high was right 54 of 61 times
+(89%), medium only 4 of 10 (40%)** - hence the pre-selection rule. Many "errors" are topically ambiguous (the golden file
+puts "Implement VMware Aria API authentication" under 4.1 while 4.3 is literally "VMware Aria Operations API Integration";
+smoke-test tasks went to the module they test instead of 4.8). Caveats: the golden subtasks are clean human-written lines,
+not the pipeline's mixed-granularity tasks; one document.
+
+**4. AI "suggest deliverables" from the project's latest SOW** (`POST /projects/{id}/deliverables/suggest`; button labeled
+**experimental**). Suggestions are stored as `review_state = suggested`, origin `agent`: they are not real deliverables and
+not RACI rows until a person accepts them; ones that restate an existing deliverable - in any state, including a rejected
+one - are not re-proposed. Each suggestion's "evidence" is kept ONLY if it is a verbatim quote from the SOW (an invented
+quote is dropped and the UI says "no supporting quote"). **(my default) the definition of "deliverable"** is a
+Claude-written sentence in `deliverable_ai.DELIVERABLE_DEFINITION` (a named, tangible output the client receives or signs
+off: documents/reports, working modules/features/views, the deployed system, a training session; not internal activities or
+single build steps) - **it needs replacing with the user's own**; the API accepts an override for experiments.
+**Measured** (`eval/nodes/eval_deliverable_suggest.py`; synthetic SOW with section 4 REMOVED, its 11 items as the key,
+matched by title similarity): recall is poor - **4/11 (36%) with the first prompt**; adding a generic "go section by
+section, list every distinct output, prefer including" instruction (tuned on this one keyed document, so optimistic) gave
+**6/11 (55%), precision ~60%**, stable over two runs, still missing 5 (Aria API integration, multi-cluster aggregation,
+Integration Testing Report, UAT Report, production deployment + smoke tests; two of those are never named outside the
+removed section, so the ceiling is below 11). The three definitions (default/strict/broad) scored about the same, so on this
+test the definition is not the limiting factor - recall is. On the forloop SOW the output is unstable: the non-exhaustive
+variant gave 9 suggestions in one run and 3 in the next. With the default prompt forloop gets 3 (Data Mapping Document,
+Customer Insights Dashboard, Training Session and User Guide - all with verified quotes). Conclusion: usable as a
+review-gated starting point, not something to trust; hence "experimental".
+
+**Open / for the review**: the user's definition of a deliverable; whether assignments should feed RACI (e.g. an implied
+Responsible from the assigned tasks' owners when a deliverable has no owner); whether the board should group by deliverable;
+dependencies between deliverables (the synthetic SOW's section 8 states some); an LLM pass for assumptions in messy PDF-style
+SOWs; the task-assignment and suggestion evals each cover ONE synthetic document, so neither number should be read as a
+general accuracy.
+
+---
+
+## Deliverables register BUILT (manual-first) + RACI by deliverable (2026-10-20)
+
+**Status**: built and tested (97 pytest tests, 21 new for this; a real end-to-end pipeline run also verified). Follows
+the investigation entry below: AI discovery of deliverables is deliberately NOT built; the register is manual-first.
+
+**What exists**
+- **`deliverables` table** (number, title, owner(s), deadline as free text, status, origin, source task) and
+  `deliverable_raci`. The status vocabulary is the same as tasks (not started / in progress / completed / blocked /
+  on hold). A deliverable number is unique per project; a task can be promoted only once.
+- **Three ways to create one** (Registers -> Deliverables tab): (1) **by hand**; (2) **Add from tasks** - pick the tasks
+  that are really deliverables out of those already extracted; title, owner, deadline and status are copied and the task
+  stays a task (this is the practical path for SOWs like the forloop one that never say "deliverable"); (3) **from a
+  SOW's numbered DELIVERABLES section**, automatically.
+- **The numbered-section parse** (`apps/utils/deliverables.py` + a new pipeline step `deliverables`, after `format`):
+  deterministic, no LLM, runs only for SOWs, idempotent on re-runs (never overwrites a person's edits), and wrapped so it
+  can never fail a run. Checked against the real files: the synthetic SOW gives its 11 deliverables (owners with role
+  descriptions stripped, "A + B" split into two owners); all five real-style SOWs give none (no invented items). A real
+  `/run` of the synthetic SOW created the 11 and a second run did not duplicate them.
+- **RACI by deliverable**: the RACI tab now has a Deliverables | Tasks toggle (deliverables by default once a project
+  has any, tasks otherwise). The matrix code was generalised so both subjects share one implementation (implied R from
+  the owner(s), the same warnings); the API response is now `{people, rows[{subject_id, number, title, ...}]}` and
+  `GET /projects/{id}/raci?subject=deliverable|task`. Nothing needed migrating (0 RACI rows existed).
+- Deliverables are deleted with their project; the shared inline-edit cell was extracted to `TextCell.tsx`.
+
+**Not built (by decision)**: AI "suggest deliverables" (needs the user's written definition of a deliverable and a
+hand-labeled real-style SOW to evaluate against); assigning tasks to a deliverable (the deliverables list is the
+prerequisite and nothing built here blocks it); dependencies between deliverables (the synthetic SOW's section 8 states
+some); parsing the SOW's numbered Assumptions (7.x) and Dependencies (8.x) into RAID items - a natural follow-up, since
+the same deterministic approach works for that document.
+
+**Observed in browser testing (open)**: promoting a task can create a near-duplicate of a deliverable that already came
+from the SOW (e.g. the task "Build Data Source Integration Module" next to deliverable 4.1 "Data Source Integration
+Module (codebase + unit tests)"). There is no duplicate warning yet; the match machinery (embeddings + gate) is the
+obvious tool when that is wanted.
+
+**Known limit**: the parser only understands dotted numbers (4.1, 4.2) under a heading literally called "Deliverables";
+other layouts simply yield nothing and the person adds them by hand or from tasks.
+
+---
+
+## Probability and impact: AI-suggested risks start BLANK (2026-10-20)
+
+**Question (user)**: probability and impact are not measured anywhere - how would the agent suggest them?
+**Honest answer**: it can't measure them; it can only estimate, and an LLM's "high probability" is poorly calibrated
+and looks more precise than it is. Nothing in the system measures them today (manual fields only).
+
+**Decision (user chose option 1)**: when the extraction step proposes a risk it fills in type, title, owner and the
+quoted source sentence, and sets probability/impact ONLY when the document itself states them ("high risk", "could
+delay go-live by two weeks") - recording the quote as evidence. Otherwise both stay empty for a person to fill.
+Empty is a valid, honest state; no guessing.
+
+**Later options (not built, not decided)**
+- *Evidence-based estimates*: once risks link to tasks, the Governance advisor can propose levels backed by numbers
+  the system really has - downstream tasks blocked (`task_dependencies`), priority and deadline proximity of the
+  affected tasks (impact); deadlines already moved (deadline-change events), stalled/blocked status, owner workload
+  (probability) - shown as "suggested" with the evidence ("blocks 4 tasks, due in 9 days"), never as a measurement.
+- *Checklist instead of a guess*: a few yes/no factors (on the critical path? deadline under two weeks? blocks other
+  work?) feeding a score computed in code - more transparent than an LLM's feeling.
+- *Calibration from outcomes*: the "It happened" action (promote to Issue) versus closing a risk records whether it
+  really occurred, so over time the hit rate per level can be measured and the estimates corrected.
+All of the evidence-based options need risks linked to tasks (the traceability question, still open), which does not
+exist yet - which is why blank is the honest default until then.
+
+---
+
+## RAID: "materialized" dropped - a risk that happens is promoted to an Issue; status colors (2026-10-20)
+
+**Question (user)**: what is the difference between Closed and Materialized? **Answer**: Closed = nothing left to
+track; Materialized = the risk actually happened and still needs handling (it turns into an Issue). It only made
+sense for risks, yet the dropdown offered it on all four types.
+
+**Decision (user chose option 2)**: drop `materialized`. Statuses are now **open / mitigating / closed** for every
+item type. When a risk happens, a person clicks **"It happened"** on the risk (with a confirm): the system creates an
+**Issue** from it (same title, description, owner and impact; starts open; no probability, since it already
+happened) and **closes the risk, linked to the new issue** (`raid_items.promoted_to`). In the table the closed risk
+reads "Happened - became an issue" and the issue reads "Promoted from a risk that happened". Rules: only a confirmed
+risk can be promoted, and only once; the button is hidden on closed risks (a retired risk is reopened first). Endpoint `POST /raid/{id}/promote-to-issue`, one transaction.
+This answers the earlier open question about "materialized -> issue" auto-creation: it is an explicit human step, not
+automatic.
+
+**Migration**: tables created with the old CHECK are migrated at startup (`ensure_registers_schema`): any
+`materialized` row becomes `closed`, the old constraint is replaced; idempotent, covered by a test that recreates the
+old state. The live database was migrated and verified.
+
+**Status colors** (user request): **open = orange, mitigating = yellow, closed = green**, applied to each row's
+status dropdown. Implemented as theme tokens in `globals.css` (`--status-open-*`, `--status-mitigating-*`, with
+separate light/dark values; closed reuses the existing success tokens), not hardcoded colors. Red is not used for a
+status: it stays the color of the Issue type chip, so the two never compete. Tests: 76 passing (4 new).
+
+---
+
+## INCIDENT: unpinned dependencies broke every tool-calling LLM path after a rebuild (2026-10-19 to 2026-10-20)
+
+**What happened**: `docker compose up -d --build frontend` (run on 2026-10-19 to see a UI change) also rebuilt the
+`api` and `mcp` images, because compose builds a service's dependencies too. `requirements.txt` had 16 unpinned
+lines, so the rebuild pulled `litellm 1.106.0` alongside `mcp 1.30.0`; litellm 1.106.0 imports
+`mcp.types.CacheableResult`, which `mcp 1.30.0` does not have. Result: ANY LLM call that passes `tools` raised an
+`ImportError` - the AI Chat, and the planning, sync-reporting and meeting-coordinator agents. Calls without tools
+(the match gate, extraction) were unaffected, which is why tests, evals and the UI work I ran afterwards did not
+reveal it. Found on 2026-10-20 when the Chat returned a 500 while verifying the Extractor/Workspace rename.
+
+**Impact**: about 28 hours. Checked the logs: no `POST /run` happened in that window, so no job failed and no data
+was lost; the only affected feature was the AI Chat.
+
+**Fix**: tested litellm 1.98.1 - 1.105.1 against `mcp 1.30.0` in throwaway containers with real tool-calling
+requests; all work, only 1.106.0 breaks. Pinned `litellm==1.105.1` and pinned every other unpinned line to the
+version running at the time (`mcp[cli]==1.30.0`, `langchain-mcp-adapters==0.3.0`, ... - `requirements.txt` now has
+no unpinned entries). Rebuilt the `api` image from the pinned file, recreated the container (not hot-patched),
+verified the Chat's tool path, an end-to-end document run (3 tasks, 5 planning-agent tool calls) and all tests.
+
+**Lessons**: (1) never leave runtime dependencies unpinned - a rebuild must not change behaviour; (2) rebuild a
+single service with `docker compose up -d --build --no-deps <service>` (the frontend-only rebuilds after this one
+used it) - without `--no-deps` compose rebuilds and recreates dependencies too; (3) the test suite mocks the LLM and
+the evals avoid `tools`, so nothing automated exercises the real tool-calling path - an offline guard is now in
+`tests/unit/test_litellm_tool_calling.py` (litellm's `mock_response` runs the library's tools branch with no network);
+verified to PASS on the pinned 1.105.1 and FAIL with the exact `CacheableResult` ImportError on 1.106.0.
+
+---
+
+## Registers v1 BUILT: manual-first RAID log + RACI matrix (2026-10-20)
+
+**Status**: built, tested and checked in the real browser (72 pytest tests pass, 14 new for registers; tab state, accept/reject, add, edit, delete, RACI cell edits and persistence across a reload all verified); shown in the sidebar as **Registers**
+(`/products/registers`, tabs RAID log | RACI matrix, URL `?tab=raci`). The AI side (extraction node, Governance
+advisor agent, Excel sheets, snapshot reports) is NOT built - the design entry below still applies to it.
+
+**What exists**
+- **RAID log**: `raid_items` table (type risk/assumption/issue/dependency, title, owner, status, probability, impact,
+  review date, `review_state` suggested/confirmed/rejected, `origin` manual/agent). `GET/POST /projects/{id}/raid`,
+  `PATCH/DELETE /raid/{id}`. UI: type filter chips with counts, add form, inline-editable table (status,
+  probability, impact, review date, owner, title), delete with confirm, "Show closed" toggle. An amber "suggested by
+  the assistant" review queue (Accept / Reject) appears when suggested items exist; rejected items are hidden, not
+  deleted (so a future extractor can avoid re-proposing them). The tab badge counts suggested items.
+- **RACI matrix**: `task_raci` table (task, person, role; one person may hold several roles, e.g. A/R).
+  `GET /projects/{id}/raci`, `PUT /tasks/{id}/raci`. UI: tasks x people grid, click a cell to toggle R/A/C/I, a
+  Check column with warnings, search, "only rows needing attention". People columns come from the Workspace People
+  roster (plus owners and assigned people), so people are managed in one place.
+- Registers are deleted with their project; `ensure_registers_schema()` self-provisions at startup like the other
+  migrations.
+
+**CONFIRMED with the user (decided; not re-opened)**: Registers is its own sidebar page with RAID | RACI tabs; UI is
+the source of truth and Excel export / snapshot reports come later (no import); new first-class entities rather than
+task columns; AI proposals arrive as "suggested" and a person confirms; extraction will be a node after `format` plus
+one "Governance advisor" agent (no separate RAID and RACI agents); build order RAID -> RACI -> reports; sidebar
+names Dashboard | Extractor | Workspace | Registers.
+
+**DEFAULTS I CHOSE for v1 (not discussed - change freely)**
+- Statuses: open / mitigating / closed (was four with `materialized` - see the entry above). Probability and impact: low / medium / high; no numeric risk
+  score or heat map. Closed items are hidden unless "Show closed" is ticked.
+- RACI is per TASK (existing tasks are the rows), not per deliverable.
+- The task owner counts as an *implied* Responsible (shown lighter, italic) until someone is given a role on that
+  task: a person with ANY explicit role is no longer guessed at (found in browser testing - an explicit "C" used to
+  leave the implied R alongside it). An owner like "Jordan Mills, Priya Nair" or "A and B" is split into people.
+- Warnings fire only on rows someone has started (otherwise every untouched task would be flagged): "More than one
+  Accountable", "Nobody Responsible", "No Accountable yet". Only the first two are definite errors.
+- No task/meeting/source-document links on items, no change history, no export yet.
+
+**NEEDS DISCUSSION (open)**
+1. **What "PMP" should mean** - PMBOK-aligned artifacts, a PM-knowledge assistant, or both (PMBOK is copyrighted).
+2. **RACI granularity** - per task, or per deliverable (the textbook way)? Should every task need an Accountable?
+   (That is why "No Accountable yet" is only a soft warning on started rows.)
+3. **Risk scales** - keep 3 levels, or 1-5 with an exposure score / heat map? Different wording for statuses?
+4. **Derived vs manual** - should blocked tasks automatically appear as Issues and task dependencies as Dependencies,
+   or stay manual? (A risk that happens is already handled: an explicit "It happened" promotion to an Issue.)
+5. **Permissions** - who may edit and who may confirm AI suggestions (ties into the RBAC design).
+6. **Audience / export** - do sponsors or the client read these outside the tool? Decides Excel sheet layout and when
+   snapshot status reports are built.
+7. **AI extraction** - when it runs, what counts as a risk vs an assumption (labeling guidelines), how it is
+   evaluated (precision first: an invented risk is worse than a missed one), cost per document.
+8. **Traceability** - link items to tasks, meetings and the source sentence in the document?
+9. **History** - who changed a status and when (audit trail), needed?
+10. **Dashboard** - an "open high risks" summary across projects?
+
+---
+
+## Sidebar renamed: Extractor | Workspace (Registers to follow) (2026-10-20)
+
+**Why**: "Task Manager" no longer described the page (it now holds Tasks, Meetings and People), and "Task
+Extractor" will outgrow "Task" once it also extracts meetings, people and RAID/RACI items.
+
+**Decision (agreed with the user)**: the Products section reads **Dashboard | Extractor | Workspace | Registers**.
+- **Task Manager -> "Workspace"**, not bare "Manager": "Manager" alone is vague and clashes with the product
+  name ("Agentic Project Manager"); "Workspace" says what it is (one project's tasks, meetings, people) and still
+  fits if more tabs are added.
+- **Task Extractor -> "Extractor"**: short, and already the route name. Names say what a person does, not how it
+  works; the page subtitle ("Turn an SOW into a plan, then keep it current with meeting minutes") carries the
+  detail. "Document Intake" was considered as more descriptive and not chosen.
+- **"Registers"** (RAID | RACI, see the design entry below) joins the sidebar when that page is built - a link to a
+  page that does not exist would be a dead end, so it is NOT in the sidebar yet.
+
+**What changed (labels only)**: sidebar, page titles, the Workspace subtitle ("Tasks, meetings and people for one
+project at a time."), button/empty-state text ("Open in Workspace", "submit an SOW in Extractor"), Settings and
+Docs/Integrations wording, a docstring in `api.py`, and the AI Chat's own instructions (`manifests/chat.md`), so the
+assistant points users to "the Workspace page" and "the Extractor" instead of the old names.
+
+**Deliberately not changed**: the URL stays `/products/task-manager` (renaming it would break saved links and the
+saved default project/view; add a redirect if it is ever renamed); internal component/function names
+(`TaskManagerPage`); backend comments that use "task-manager project" generically; and the older entries in this
+log, which keep the names that were current when they were written.
+
+---
+
+## RAID log, RACI matrix and "PMP": design only, NOT built (2026-10-20)
+
+**Status**: discussed and designed with the user; nothing implemented. Written down so it can be built later
+without re-deriving it, in the same spirit as the RBAC entry. Direction from the user: the system should grow
+from managing tasks and meetings into a broader AI assistant for project managers.
+
+**What the two artifacts are, and what the system already has**
+- **RAID** (Risks, Assumptions, Issues, Dependencies). Partly present already: dependencies live in
+  `task_dependencies`, blockers (`tasks.blocker`) are effectively issues. Risks and assumptions are exactly the
+  statements the pipeline discards today - the golden data's "should not be picked" sections are full of them
+  ("whitelist expected by April 17", "tokens expire after thirty minutes", API-limit discussion).
+- **RACI** (Responsible, Accountable, Consulted, Informed). `tasks.owner` roughly gives R. A, C and I are rarely
+  stated explicitly; they come from cues ("Marcus approves", "keep Sarah informed", review/sign-off wording) and
+  mostly need a person to confirm. RACI is normally per deliverable, not per low-level task.
+
+**Decisions**
+1. **Where it lives in the UI: a new sidebar page, "Project Registers", with tabs RAID | RACI** - not more tabs in
+   Task Manager. Reasons: Task Manager already became Tasks | Meetings | People; these are governance artifacts
+   with a different audience (sponsor/PMO) and rhythm; later registers (stakeholders, change log, lessons learned)
+   get a natural home. Reuses `Tabs.tsx`, the project selector and `?project=`. A small "open high risks" card on
+   the Dashboard is a possible later summary, not the register itself. AI Chat should answer questions about both
+   but is not where they live.
+2. **UI first, files second.** They are living registers (change every meeting, need confirm/edit), so the UI over
+   the database is the source of truth; Excel export is a read-only view of it (extra sheets on the existing
+   `/projects/{id}/export`); **no import** (edits in an exported file would diverge from the system). "Reports"
+   are point-in-time snapshots generated from the database on demand (e.g. weekly status report), built last.
+3. **Data model: new first-class entities, not new task columns.** `raid_items` (type, title, description, owner,
+   status open/mitigating/closed/materialized, probability, impact, review date, source document + excerpt, linked
+   task ids, origin agent|manual, review state suggested|confirmed|rejected). `task_raci` (deliverable or task,
+   person, role R/A/C/I, source, review state). Dependencies and issues are **derived/linked** from
+   `task_dependencies` and blockers rather than duplicated. A real `projects` table (name, sponsor, stakeholders,
+   phase) is a needed foundation - `project_id` is only a string on rows today.
+4. **Agents: extraction is a node, analysis is one new agent.**
+   - Governance extraction = ONE structured LLM call per document (same shape as the `extract` node, no tool loop)
+     that pulls candidate risks/assumptions/issues and role cues. Runs AFTER `format` so items can link to real
+     task ids. Kept separate from the existing `extract` node on purpose: that node's job is tasks, and mixing in
+     informational statements would hurt its precision.
+   - De-duplication ("same risk mentioned again" = update, not a new row) reuses the match machinery (embedding
+     candidates + LLM gate); it is the same problem already solved for tasks.
+   - RACI is mostly derived: owner -> R in code, A/C/I from the extraction cues, then code validation (exactly one
+     A, at least one R, no person missing from the roster).
+   - ONE new conditional agent, a "Governance advisor" (ReAct with tools, triggered like `sync_reporting`), that
+     cross-checks tasks, dependencies, blockers and the registers and proposes new items (a blocker -> issue, a
+     slipping dependency -> risk, an unassigned A) and writes the status report.
+   - **Rejected: separate RAID and RACI agents** - same inputs and tools, so splitting only duplicates prompts.
+   - Tools follow the existing entity-mapped principle (get/upsert raid items with filters, get/set raci), not
+     one tool per question.
+5. **Human in the loop for everything AI-proposed.** Items land as "suggested" until a person confirms, edits or
+   rejects them (same pattern as possible duplicates); each decision is recorded for later training/evaluation. An
+   invented risk is worse than a missed one, so precision matters more than recall here.
+6. **Evaluation plan**: a node-level eval for governance extraction in the style of the match evals (fixed state,
+   target-correct scoring). The golden "should not be picked" statements are a starting pool for labels but need
+   hand-labeling as risk / assumption / issue / not-governance; measure invented items (precision) first.
+7. **Build order**: (1) RAID log, (2) RACI, (3) PMBOK-style reports and registers generated from data we already
+   hold (status report, stakeholder register, change log, lessons learned). RAID first because the data is already
+   flowing and it reuses blockers and dependencies.
+
+**Open / not decided**
+- **What "PMP" should mean.** Two readings: (a) make the system's artifacts PMBOK-aligned (RAID, RACI, stakeholder
+  register, change log, status reports, lessons learned); (b) a PM-knowledge assistant in Chat. Caveat for (b): the
+  PMBOK Guide is copyrighted, so it cannot be ingested; options are the model's general PM knowledge or content the
+  user licenses. Waiting on the user's intent.
+- **Who reads these outside the tool** (sponsors, the client)? If they do, Excel export and snapshot reports move
+  up the order.
+- Probability/impact scales and the risk status workflow (open -> mitigating -> closed, or materialized -> issue).
+- RACI granularity (deliverable vs task) and how deliverables are identified (the SOW's numbered deliverables are
+  the obvious source).
+- Who may confirm items - tie into the RBAC design (project_members roles) when that is built.
+
+**Related**: possible-duplicate review + `duplicate_decisions` (the confirm-and-record pattern), the match gate (dedup
+of repeated items), the RBAC design (who confirms), the node-eval approach (how this is tested).
+
 ---
 
 ## Pending meetings: passive "needs attention" notice instead of an automatic pop-up (2026-10-20)

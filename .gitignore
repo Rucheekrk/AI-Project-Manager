@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+.env
+logs/
+*.log
+.DS_Store
+.claude/
+reports/
+datasets/inputs/Burlington-oneoff-meeting/*.mp4
+datasets/inputs/Burlington-oneoff-meeting/*.mp3
+INTEGRATIONS.md
+timesheets/
