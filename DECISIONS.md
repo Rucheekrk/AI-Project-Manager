@@ -13,6 +13,21 @@ considered and not chosen, and current status.
 
 ---
 
+## Docs becomes a Guide; Feedback removed (2026-10-30)
+
+**Why.** Feedback was a "coming soon" placeholder with no form or storage, which looks unfinished in a demo. Docs was three stale blurbs (it still
+described the old task export and said nothing about Hours, the plan or the timesheet folder). With no timesheet upload button, people have to be
+told where files go.
+- **Feedback:** the sidebar link and `/feedback` page are removed. Not replaced: a real version needs storage and someone who reads it. Cheap options
+  if wanted later: a "Send feedback" email link in Settings, or thumbs up / down on AI Chat answers (the more useful signal).
+- **Guide:** `/resources` is kept (so no link breaks) and rewritten as seven short cards in the order a project goes: get a project in, keep the plan
+  here, send timesheets by folder (path, file-name rule, what Imported / Needs review / Already imported mean), read the hours status, Registers, AI
+  Chat example questions, Jira and Calendar. Static text, each card links to its screen. Chat examples only use questions that have a tool behind them
+  (there is no risk tool, so none is listed). The sidebar label is now "Guide".
+- **Upkeep:** it is hand-written, so it goes stale when a screen changes; update it in the same change.
+
+---
+
 ## Timesheets arrive by folder, not by upload button (2026-10-30)
 
 **Why.** The manager's direction: no upload buttons for timesheets. Timesheets are produced by other people, so they are PULLED IN
