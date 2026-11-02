@@ -10,4 +10,5 @@ reports/
 datasets/inputs/Burlington-oneoff-meeting/*.mp4
 datasets/inputs/Burlington-oneoff-meeting/*.mp3
 INTEGRATIONS.md
-timesheets/
+projects/
+backups/

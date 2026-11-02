@@ -13,6 +13,76 @@ considered and not chosen, and current status.
 
 ---
 
+## Plan and meetings by folder; the app becomes a view (2026-10-30)
+
+**Why.** The manager's direction: nobody will log in to edit a system when they already maintain the plan elsewhere, so the app takes its inputs
+from folders and keeps almost no editing. The other view (kept in the discussion): a view-only dashboard is easy to replace, so the value has
+to be what the app DOES with the inputs (read the plan, timesheets and meetings together, tell the PMO). The middle path built: **inputs arrive
+by folder, decisions stay in the app, and only for suggestions the PMO approves and the few things that are not in any file.** The full
+editable version is kept as the git tag `v1-editable` (origin). Defaults confirmed by the user: Excel plan; PMO is the one user who logs in;
+status comes from the plan; approved changes are merged into the plan file, not into a separate file.
+- **Folders:** `projects/<id>/plan/`, `meetings/`, `timesheets/` (each with processed/needs-review where files move; `plan/versions/` for backups).
+  One watcher thread (`timesheet_watcher._loop`) runs the timesheet scan, then `project_folders.scan_all` (plan, meetings, then the merge of
+  anything approved). `projects/` is gitignored. The project is the FOLDER's, never the file's.
+- **Plan = the Excel file** (`apps/db/plan_sync.py`, `apps/utils/plan_file.py`). It stays in plan/ and is edited in place; it is read again when
+  its contents change (the latest record per file NAME decides, so changing it back to an older version is a change). Columns: Task ID, Phase,
+  Task, Owner, Start wk, Finish wk, Est. hours, Notes, Status, Depends on (the importer's header synonyms apply; Estimate and Task are
+  required). A row matches a task by Task ID (`tasks.plan_ref`), else by name (exact, meaning, model check: the old plan matcher); a plan with no
+  id column gets a stand-in id from the name. New row = new task; a task that was in a plan version and is no longer = removed from the plan; tasks
+  that never were in a file are left alone. The FIRST version read is the baseline; later versions write per-field lines to the change history
+  (source `plan_file`). Filling a blank owner or phase is not logged as a change. Budget, kickoff and role budgets are taken from the file too.
+  A version that drops more than 30% of the plan (at least 4 tasks) is HELD until a person confirms ("Apply anyway"). Status words and
+  percentages are understood (`map_status`). CSV and .xlsm plans can be read but not written back to.
+- **Meetings = suggestions** (`apps/utils/meeting_suggest.py`, `prompts/plan_suggest`). One model call reads the transcript against the plan's
+  NUMBERED tasks and the roster (not the Extractor's extract/normalize/match nodes: on a real transcript those missed a "VPN resolved, task done"
+  status update and turned a hand-over of an existing task into a new task). Every suggestion carries the sentence it rests on. Owners are written
+  as the roster writes them ("David" = David Osei) so the same person is never a "change". Only fields that differ from the plan are suggested.
+  A failed or unreadable model answer fails the file (needs-review), it is never reported as "no suggestions". Nothing is written to tasks, Jira
+  or the calendar at this stage. Same transcript twice = duplicate. Transcripts: .txt .md .vtt .srt .docx.
+- **Approve, then merge** (`apps/utils/plan_merge.py`): states suggested, approved, waiting, blocked, merged, confirmed, missing, applied,
+  rejected. Safeguards: not while the plan is open in Excel (`~$` lock file: "waiting", retried each scan); the file's current contents are read
+  first, so someone's own edit is kept; a copy goes to plan/versions/ first; the write is one atomic replace; new tasks are appended after the
+  last task row (a totals row below is moved down, a SUM over the table is extended, a plain-number total that equalled the old sum follows);
+  an existing task changes only its own cell; a missing Status column is added; the team's own status words are reused ("Done", "WIP");
+  charts, images, pivot tables, merged cells or formulas that cannot be moved safely BLOCK the write with a reason. The file is read back at once:
+  the suggestion is "confirmed" when the plan shows it, "missing" when a later version no longer has it (Apply again). A change to a task that
+  was never in the plan file, and every approval on a project with no plan file, goes straight into the app's task list (labelled so).
+- **Jira after approval:** an approved NEW task is sent to Jira only once it is in the plan (confirmed or applied), never at suggestion time.
+  `PLAN_JIRA_SYNC=0` switches it off. **forloop has the Jira key FLP: approving a new task on it creates a real Jira issue**; run the meeting demo
+  with `PLAN_JIRA_SYNC=0` or reject new tasks. The Extractor page is now SOW-ONLY (decided by the user: the SOW stays manually uploaded or pasted): the API runs the graph with
+  `sow_only`, and when the Supervisor takes the text for meeting minutes the run stops at a `redirect` node (`apps/nodes/redirect_node.py`),
+  creates nothing, and tells the user to use `projects/<id>/meetings/`. The SOW path (tasks, registers, deliverables, budget, Jira) is
+  unchanged. Callers that do not set `sow_only` (tests, evals) still run minutes through the whole graph. The Supervisor's rule is unchanged: a
+  project with no tasks treats any text as an SOW, so an SOW sent to a project that already has a plan is treated as minutes unless it has
+  SOW wording ("statement of work", "scope of work", "deliverables:", "this agreement"); it was not checked live against a Jira-keyed project.
+- **Starter plan file** (`apps/utils/plan_starter.py`): running an SOW now also writes `projects/<id>/plan/<id>-plan.xlsx` from the tasks it created
+  (Task ID T-001.., Phase, Task, Owner, Start wk, Finish wk, Est. hours, Notes with the deadline, Status, and a SUM total), and reads it back at
+  once so every task takes its Task ID. Only when the plan folder has no plan file (never over or beside one). The PM then edits that file in Excel
+  like any plan. The baseline is set when the first estimates arrive, not at creation. Projects that have tasks but no plan file get a "Create the
+  plan file" button in Workspace > Tasks (`POST /projects/{id}/starter-plan`). The SOW still creates its Jira issues directly, as before.
+- **Editing removed (UI only):** Workspace > Tasks (every editable cell, add and remove task, set baseline, duplicate merge, dependency and
+  deliverable pickers, plan upload), Hours > Overview > Needs attention (it now says what to change in the plan file), Hours > Timesheet (the
+  hand-entry grid and the upload button). Kept because they are not in any file: the people roster, capacity and skills (Workspace > People),
+  Settings, budget and kickoff on the Hours Overview, approvals, Check these matches and Review for timesheets. The API endpoints that edit tasks
+  still exist (the tests and the demo reset use them); an edit made through them is overwritten by the next plan read for plan-file fields.
+- **Weekly summary:** `GET /projects/{id}/weekly-summary` and a card on Hours > Overview: status, hours, plan against baseline, changes in the
+  last 7 days, needs attention, over-capacity people, suggestions waiting. Plain text to paste; **nothing is sent** (there is no email channel
+  wired and sending is outward-facing, so it needs its own decision).
+- **Golden data:** `forloop-plan.xlsx` now has a Status column (end-of-Week-4 states). The `--existing` loader clears the new tables, archives
+  plan/meetings/timesheets files to `projects/_archive/`, and copies the plan file into plan/ last. Demo drops: the week 5 timesheet
+  (`forloop-timesheet-week5.csv`) and the week 5 meeting (`forloop-meeting-week5.txt`) into the matching folders.
+- **Tested:** 396 tests passing. Live: a transcript through the real model produced the right suggestions with quotes (one run left out the QA
+  item: the model is not perfectly repeatable, which is why every suggestion is approved by a person); approving wrote the new row and the
+  changed cells into the real Excel file and the read-back confirmed them.
+- **Risks and not done:** the Excel writer is openpyxl (loses features it cannot hold, which is why charts and the like block the write);
+  a plan synced through OneDrive or SharePoint can still get a sync conflict if two people save at once; `.mpp` and Microsoft Project XML are not
+  read; only the newest plan file is written to; a second sheet of tasks is not read; no sign-in, so approvals say "the PMO" not a name; the
+  model can miss a mention or choose the wrong task (the quote and the approval are the safety net); dependencies are read from the "Depends on"
+  column but never written back. Running tests while the API reloads (it reloads when a file changes) can deadlock on the database: wait
+  about 30 seconds after an edit before running pytest.
+
+---
+
 ## People edits the roster, Capacity analyses it (2026-10-30)
 
 **Why.** Workspace > People and Hours > Capacity both listed the same people and both edited weekly capacity and skills, so one fact could be
