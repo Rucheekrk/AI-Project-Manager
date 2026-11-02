@@ -12,3 +12,4 @@ datasets/inputs/Burlington-oneoff-meeting/*.mp3
 INTEGRATIONS.md
 projects/
 backups/
+datasets/golden/emails.local.json

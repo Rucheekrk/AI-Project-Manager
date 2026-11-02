@@ -13,6 +13,60 @@ considered and not chosen, and current status.
 
 ---
 
+## Four demo projects, one-command reset to golden (2026-11-02)
+
+**Why.** The user wants four projects to show clients, extensively tested for two days, then rolled back to an identical starting state so the same demo can
+be run in front of a client again. Everything below serves that: the data, the reset, the checks that prove the reset.
+- **Cleanup first.** A database dump and a tar of `projects/` went to `backups/` (gitignored). `scripts/cleanup_demo_data.py` (dry run by default) removed every
+  project except `forloop`, about 25 ghost ids that existed only as people or meeting rows, all chat history and the `projects/` test folders. Test code, eval
+  code and datasets were not touched. Cause of the junk: the tests ran against the live database. **Tests now use a separate database**
+  (`scripts/run_tests.sh`, created by `scripts/setup_test_db.sh`); `tests/conftest.py` refuses to run unless `DB_NAME` contains "test". This also removed the
+  old reload deadlock (pytest on the same database as the reloading API).
+- **The four projects**, one vendor (Forloop, now described as an AI engineering company in its SOWs), invented clients (names searched for real companies;
+  none found, except "Meridian Retail Group", which IS a real Tampa firm and was renamed **Calderwick Retail Group** everywhere: SOW, MoM, plan, dataset,
+  generator, answer key, 6 task names, risks, deliverables, meeting text, indexed chunks and search vectors). `forloop` Watch (Calderwick dashboard, Jira FLP);
+  `tarnwood` On track (the VMware simulation, see below); `halvane` At risk (onboarding portal); `marrowfield` On track, just kicked off. Nirmal Babu, Ram
+  Anandkumar and Rucheek are on every project with their emails (from forloop's roster; never written in code); all other people are invented and have no email.
+  The Ram / Rucheek role swap (Ram Technical Director, Rucheek Infrastructure Engineer) is now in the forloop SOW and generator too.
+- **tarnwood is made from `datasets/simulation-ai-x-vmware`** (SOW plus 8 meetings with expected outputs) by `scripts/golden_build/transform_sim.py`: names
+  (QuantumEdge to Forloop, NovaTech to Tarnwood Industrial, Sarah to Nirmal, Jordan to Rucheek, Marcus to Ram), every date moved exactly 25 weeks so weekdays hold,
+  originals untouched. Plan = the SOW's 11 deliverables plus every action item of meetings 1 to 5 (53 tasks, statuses from each meeting's updates); weeks run
+  Wednesday to Tuesday (`week_start_day` 2, as the SOW). The live drop is meeting 6.
+- **How a project is built** (`scripts/golden_build/`): the way a real one comes to exist. A spec (people, tasks, hours, risks, deliverables, meetings, texts)
+  becomes an Excel plan that the app READS (tasks, baseline, history and dependencies come from it; a change request or raised estimates become version 2),
+  documents are indexed for search, hours are saved as timesheets, timestamps are backdated to the project's own timeline. No model calls. Marrowfield's drop is
+  a plan version, halvane's and tarnwood's are meetings, forloop's is a timesheet (one file per project, as decided).
+- **Golden export and restore** (`apps/utils/golden.py`, `scripts/golden.py`): a project exports to `datasets/golden/<id>/` (rows of every table, the folder
+  files, a manifest of counts and key numbers); `restore` wipes the project and rebuilds it with the same ids in about a second (tarnwood 9 s: more vectors);
+  `verify` lists every difference. The watcher is paused while it runs (`.paused` / `.scanning` markers in `projects/`; a stale scan marker is cleared at
+  start-up; a failed pause never leaves it paused). Restoring moves each meeting still waiting for approval to 10:00 on the next business day (an invite must be
+  in the future). `restore all` also clears chat history and the activity feed. Exports hold `<<email:Name>>` instead of real addresses (the client repo must not
+  receive them); the real ones live in a gitignored `emails.local.json`. A restore does NOT undo Jira issues or calendar events.
+- **Frozen demo date** (`apps/utils/clock.py`, `DEMO_TODAY=2026-10-29` in docker-compose, empty = real): hours "as of", who is free, what is late and relative dates
+  in transcripts are worked out as of that day, so answers do not drift. A marker shows it in the sidebar. Not used for the meeting coordinator or calendar.
+- **One-time real tests, agreed with the user:** the calendar approval is tested once, on purpose, never in rehearsals (it sends invites); rehearsals run with
+  `PLAN_JIRA_SYNC=0`. **Neither real test has been run yet.** Jira is currently DOWN: the site answers `SUSPENDED_INACTIVITY` ("subscription deactivated due to
+  inactivity"). It must be reactivated in Atlassian; the 5 FLP issues whose titles still say Meridian are then fixed with `python -m scripts.sync_jira_titles forloop`
+  (the app's own task names are already renamed).
+- **Meeting suggestions rebuilt after rehearsing on the new projects.** Findings and fixes: the same suggestion repeated 6 times when a long transcript was split
+  in two (now one call for any normal transcript, and duplicates within a run removed); the small default model mapped everything to existing tasks and found 6
+  items in a long transcript (now `PLAN_SUGGEST_MODEL`, default gpt-4.1, like `RAID_AI_MODEL`); concrete steps towards a deliverable are new tasks, never the
+  deliverable itself; a stated plan week ("Week 10") becomes a finish-week change; approved, received or confirmed means completed. Measured over 10 runs each
+  against the stored drops: halvane 10/10 on all five expected suggestions; tarnwood at least 6 of its 8 meeting topics on 10/10, the whitelist completion 10/10,
+  but all 8 topics only on some runs (the answer key's "completed" updates are partly implied, not stated). Approving all of them merged 13 of 13 and 5 of 5 into
+  the plan files.
+- **AI Chat.** New tools `get_project_risks` and `get_project_deliverables`; chat tools now resolve a loosely written project ("the Halvane portal") to the real id
+  and answer an unknown one with the list of real projects (it had guessed `halvane-portal`, got an empty result and said the SOW did not cover it).
+  `scripts/golden_build/questions.py` writes 10 questions per project with answers worked out from the loaded data; `scripts/chat_check.py` asks them to the real chat:
+  **40 of 40 pass.** The Workspace "Meetings" tab is now "Scheduled meetings".
+- **Seeded records that look real but are not:** each project's "scheduled" meeting is a stored record, not a calendar event (no link). `forloop`'s risks: 9 of 13
+  confirmed, 4 left suggested; the other projects have 2 suggested each, to show the review.
+- **Not done / risks:** Jira is down (above); the two one-time real tests; hours history shows no "Incoming timesheets" files for tarnwood, halvane and marrowfield
+  (empty until the drop); the Hours Overview still lets you edit budget and kickoff; a restore cannot undo an invite or a Jira issue created during a demo; model
+  output varies slightly between runs (measured above); the golden exports are 0.2 to 0.5 MB each in git.
+
+---
+
 ## Plan and meetings by folder; the app becomes a view (2026-10-30)
 
 **Why.** The manager's direction: nobody will log in to edit a system when they already maintain the plan elsewhere, so the app takes its inputs
