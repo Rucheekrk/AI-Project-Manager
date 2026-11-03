@@ -2252,3 +2252,27 @@ consumers) doesn't add anything for tools an agent's own process already imports
 Worth revisiting if/when external consumers of this system's tools become real.
 
 ---
+
+## A transcript in the meetings folder can also propose a follow-up meeting
+
+**Date:** 2026-11-02
+**Status:** Implemented
+
+**Problem:** the Meeting Coordinator agent only ran inside the Extractor's MoM path. After the Extractor became SOW-only and meetings began arriving by
+folder, a transcript produced plan suggestions but never a proposed meeting, and the demo's pending meetings were stored rows, not something extracted.
+
+**Decision:** `process_meeting_file` now also calls `apps/utils/meeting_followup.propose_followup`. A cheap wording check (`has_hint`) decides whether to pay for an
+agent run; the agent decides whether a follow-up is warranted; a warranted one is stored as `pending_approval` (Scheduled meetings tab). Nothing reaches the
+calendar before a person approves. A failure there never fails the file (the suggestions are kept, the summary says `followup: error`). Routine "next sync: Wednesday"
+lines are deliberately NOT proposed (3 of 3 runs on the halvane demo file); an explicit "let's reconvene Friday at 2" is (10 of 10).
+
+**Why the agent changed:** on the small default model it spent all 8 tool calls re-checking the same people's availability and never called `propose_meeting`. Now: a
+stronger model (`MEETING_COORDINATOR_MODEL`, default gpt-4.1), repeated identical tool calls answered from memory, a stricter prompt, and a one-call rescue pass (which sees the
+minutes) when the agent says "warranted" but did not propose.
+
+**Also:** `schedule_meeting` gives a time with no UTC offset the zone `MEETING_TIMEZONE` (default America/New_York); Google rejects a plain local time otherwise, and proposed
+or golden meetings are stored as plain local times.
+
+**Not changed (asks first):** the golden demo transcripts. Neither asks for a meeting, so no demo file shows a proposal yet.
+
+---
