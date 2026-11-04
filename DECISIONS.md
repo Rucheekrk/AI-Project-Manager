@@ -2276,3 +2276,19 @@ or golden meetings are stored as plain local times.
 **Not changed (asks first):** the golden demo transcripts. Neither asks for a meeting, so no demo file shows a proposal yet.
 
 ---
+
+## Chat answers must be the same every time, and the Dashboard counts problems (2026-11-03)
+
+**Chat.** Same question, different facts was the bug (temperature was already 0). Fixed in the tools, not with rules for particular words:
+the chat prompt now states today's date; availability for a week that is over is what was logged (not "0 planned, all free"), and such a week is counted whole
+(hours are logged per week), a window ending on a week's first day stops before that week, and totals over several weeks are named `..._across_all_N_weeks`; the hours
+report gained `logged_by_person_week` (the old "by person and week" text promised it but only totals existed); a search that returns blocked tasks also returns the
+project's live risk-register issues (that is where the reason is written); the dependencies tool says a dependency alone is not "blocked". `scripts.chat_check --runs N`
+asks every golden question N times: 46 of 46 questions passed 5 of 5 runs.
+
+**Dashboard.** Every all-projects tile is a COUNT of something wrong, with the projects or people behind it, never a sum or average (total hours left can look healthy while
+one project is over budget). Removed: Total tasks, Completed (41 of 57 were one finished project) and High priority, which also counted completed tasks. The nine tiles: projects needing
+attention, projects forecast over budget, blocked, overdue (by the plan's own due date, the one the Capacity page uses), open high-impact risks and issues, people over capacity
+(distinct people, next four weeks), open high-priority tasks, meetings awaiting approval, open tasks. A tile at zero turns green. `GET /dashboard/attention`, `apps/utils/dashboard.py`.
+
+---
