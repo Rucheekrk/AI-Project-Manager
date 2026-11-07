@@ -2292,3 +2292,17 @@ attention, projects forecast over budget, blocked, overdue (by the plan's own du
 (distinct people, next four weeks), open high-priority tasks, meetings awaiting approval, open tasks. A tile at zero turns green. `GET /dashboard/attention`, `apps/utils/dashboard.py`.
 
 ---
+
+---
+
+## A fresh checkout restores without the emails file (2026-11-07)
+
+**Problem.** The golden exports keep `<<email:Name>>` instead of addresses, and a restore filled them from the gitignored `datasets/golden/emails.local.json`. A new machine (a colleague
+cloning from GitHub) has no such file, so the first restore stopped with "No email known for ...", and the setup guide needed a manual step to write the file.
+
+**Decision.** `golden._show_emails` falls back to `first.last@example.com` placeholders only when the file does not exist at all. A file that exists but misses a person still raises: on a machine that
+has real addresses, a typo must not quietly turn into an address that goes nowhere. An address already on a project's roster still wins over a placeholder. Nothing is written to disk.
+**Why placeholders are safe:** a calendar invite approved on such a machine goes to `@example.com`, never to a real person. `tests/unit/test_golden_emails.py`; a clean clone from GitHub restored all four
+projects without the file.
+
+**Also.** `tests/unit/test_llm_extra_body.py` read the real `.env`, so it failed once `.env` set `LLM_EXTRA_BODY` (the app reloads `.env` on import); the test now stubs `load_dotenv`.
