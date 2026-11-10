@@ -2306,3 +2306,25 @@ has real addresses, a typo must not quietly turn into an address that goes nowhe
 projects without the file.
 
 **Also.** `tests/unit/test_llm_extra_body.py` read the real `.env`, so it failed once `.env` set `LLM_EXTRA_BODY` (the app reloads `.env` on import); the test now stubs `load_dotenv`.
+
+---
+
+## Gemma on the DGX Spark first, gpt-4o-mini on OpenAI as the fallback (2026-11-10)
+
+**Setup (.env only).** `LLM_MODEL=hosted_vllm/gemma4`, `LLM_API_BASE=http://<spark>:8000/v1`, `LLM_API_KEY`, `LLM_EXTRA_BODY={"chat_template_kwargs": {"enable_thinking": false}}`
+(Gemma's hidden "thinking" made a one-word answer 6.5 s instead of 0.3 s), the three per-task models empty, and `LLM_FALLBACK_MODEL=gpt-4o-mini`. The fallback uses `OPENAI_API_KEY`
+unless `LLM_FALLBACK_API_KEY` is set, and the provider's own address unless `LLM_FALLBACK_API_BASE` is. Unset `LLM_FALLBACK_MODEL` and `complete()` is the plain single-model call, as before.
+
+**Why the old `LLM_FALLBACK_MODEL` was replaced.** It passed litellm's `fallbacks=[model]`, which re-sends the same call, so the fallback received the Spark's address and key: gpt-4o-mini would
+have been asked of the Spark. Never exercised before (see "Not built" above). `complete()` now makes the second call itself, with the fallback's own key and address, and never sends the
+primary's `extra_body` / headers to it (OpenAI rejects a vLLM-only field).
+
+**Measured, and why there is a reachability check.** litellm drops an `httpx.Timeout(connect=3)` for a self-hosted provider, so a call to an unreachable Spark failed only after 75 s (the operating system's own
+connect timeout). `complete()` opens a 3 s TCP connection to the primary's address first; unreachable means straight to the fallback, and the primary is skipped for `LLM_FALLBACK_COOLDOWN` (30 s) so one outage
+does not add 3 s to every call. A connection error, timeout or 5xx starts the cooldown; any other error (a bad request, a too-long prompt) falls back for that one call only. `LLM_TIMEOUT` (300 s) bounds a call that
+did connect: a 31B model writing a long JSON answer at ~11 tokens/s is slow, not broken. Live, with the Mac off the Spark's network: first call 4.9 s, the next ones 0.7-0.9 s, all served by gpt-4o-mini.
+
+**Known limits.** (1) `LLM_API_BASE` applies to every call that is not the fallback, so a per-task model such as `gpt-4.1` would be sent to the Spark: keep `RAID_AI_MODEL`, `PLAN_SUGGEST_MODEL` and
+`MEETING_COORDINATOR_MODEL` empty. (2) Those three jobs were measured to need gpt-4.1 (see the RAID and plan-suggestion comparisons); on Gemma or on the gpt-4o-mini fallback they are weaker, and the quality
+of Gemma on them is not measured yet. (3) The answer does not say which model wrote it; the switch is logged to `logs/app.log` ("using the fallback"). (4) `scripts/llm_probe.py` removes the fallback
+before it runs, so a dead server cannot pass by using the backup. `tests/unit/test_llm_fallback.py`.
