@@ -1,3 +1,7 @@
+# Docker names the database volume and the images after this, so it must not depend on the folder name: renaming or re-cloning the folder used to start
+# with an empty database. COMPOSE_PROJECT_NAME (e.g. in .env) still overrides it.
+name: agentic-project-manager
+
 services:
     postgres:
         image: pgvector/pgvector:pg16

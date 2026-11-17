@@ -2363,3 +2363,31 @@ saves the state it replaces as `before-restore` (one per project; `--at before-r
 so a new checkpoint follows a restore. The checkpoint folder lives next to the repo on the same disk: it survives a lost Docker volume, not a deleted repo folder. The investor-demo script now uses
 `restore all --golden`. Not built: a restore button in the UI. `tests/db/test_checkpoints.py` (8 tests); the command-line flow was run end to end on a throwaway test-database project; on the live
 demo data the four projects were fingerprinted twice (stable) and each got its first checkpoint 2 minutes after the API started.
+
+
+---
+
+## One shared instance instead of per-laptop copies - discussed, not built (2026-11-17)
+
+**Status:** Designed only. Paused by the user; to be finished together with the RBAC design above, because a shared instance makes the missing login the main risk.
+
+**Problem.** A 5th project (an SOW the manager ran on his laptop) did not appear in the user's UI. Every laptop runs its own Postgres in a Docker volume and its own `projects/` folder, so each is a separate copy, not one source of truth.
+
+**Why a shared Box folder is not the answer.** Files are only part of a project. The plan Excel, meeting transcripts and timesheets are files the app reads; the SOW text and its search vectors, RAID items, deliverables, RACI, people and capacity, hours settings, suggestions, approvals, UI edits and chat live only in the database. Two instances watching one synced folder would each build their own database from the same files: model-made suggestions differ per machine, approvals made on one do not exist on the other, the watcher's file moves (`processed/`, `needs-review/`) and its marker files (`.paused`, `.scanning`) would be synced between the machines and conflict, and Jira issues or calendar invites could be created twice. The Postgres volume and `checkpoints/` must never be put in a synced folder.
+
+**Direction.** One running copy (one database) on one always-on machine, everyone using its URL: `docker compose up` on, by default, the DGX Spark. No cloud database (the data would leave the environment). The existing data moves once, with the checkpoint feature: `scripts.golden checkpoint all` on the manager's laptop, copy `checkpoints/` over (Box, `scp` or a USB stick: one transfer, the method does not matter), `restore all` on the new machine. After that the laptops are no longer a place data lives; two writers would diverge again. Box can later be a shared inbox for files, only if a single instance watches it.
+
+**Blockers found in the code.** (1) No authentication at all (see "RBAC design"): confirmed again, `apps/api.py` has no auth hook, so anyone who can reach the server can delete a project or approve a meeting (a real calendar invite). (2) CORS allows only `http://localhost:3010` (`apps/api.py`), so a UI opened from another address is refused. (3) `NEXT_PUBLIC_API_BASE` is baked into the browser bundle at build (`docker-compose.yml`, `frontend/Dockerfile`, now `http://localhost:8010`), so the frontend must be built for the server's address. (4) Meetings, timesheets and plan files are dropped into `projects/<id>/` folders on the machine running the watcher: colleagues need a way to put files there (a network file share mounted onto those folders needs no code; Box via `rclone`; or an upload button in the UI, which is new work; whether the UI has one for these files was not checked). SOWs already go through the UI. (5) Unverified: the images build on the Spark's ARM Linux; Box has no official Linux sync client. (6) The shared copy becomes the only copy: it needs a regular backup (`checkpoints/` helps; a nightly `pg_dump` copied off the machine is better).
+
+**Open decisions.** Which machine (default: the Spark; training or a restart there takes the app down for everyone). Who reaches it from where (default: office network only; home access needs a VPN, Tailscale was rejected). Logins (default none for now: open access on the office network). Whether to do the one-time checkpoint hand-off as a stopgap today (default yes, tested first). How colleagues drop files (default: a network share).
+
+
+---
+
+## The Docker Compose project name is pinned in docker-compose.yml (2026-11-17)
+
+**Problem.** Compose names the database volume (`<project>_pgdata`) and the images after the project name, and by default that is the folder name. Renaming the folder to `AI-Project-Manager` on the user's Mac made Compose look for a new, empty volume (and a rebuild of every image); the data stayed in the old volume, unattached. The same happens after a re-clone or a move, and is the likely cause of "the data is gone again" on the manager's laptop (not confirmed: the volume checks were never sent back).
+
+**Decision.** `name: agentic-project-manager` at the top of `docker-compose.yml`. It matches the folder a fresh clone of the Forloop repo gets by default, so the manager's laptop (folder `Agentic-Project-Manager`, so project `agentic-project-manager`: to be confirmed with `docker compose ls`) keeps its volume and images with no migration, and any later clone or rename keeps them too. `COMPOSE_PROJECT_NAME` (an environment variable or `.env`) still overrides it, which is how the user's Mac stays on its existing volume `ai-project-manager_pgdata`: its local `.env` has `COMPOSE_PROJECT_NAME=ai-project-manager` (not committed).
+
+**What the pin does NOT do.** A machine whose current project name differs from the pinned one gets a fresh empty database on the next `docker compose up` (the old volume is left untouched). Before pulling this, check the name with `docker compose ls`: it must show `agentic-project-manager`. If it shows another name, either add `COMPOSE_PROJECT_NAME=<that name>` to that machine's `.env`, or move the data: `checkpoint all` (with `-p <old name>`), `down`, tag the images with the new names to avoid a rebuild, `up -d`, `restore all`. Done once on the user's Mac on 2026-11-17 (backup first, images re-tagged, `restore all --golden`).
