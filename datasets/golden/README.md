@@ -18,8 +18,10 @@ event and sends invites to those three, so do it once to see it work, not on eve
 
 ```
 python -m scripts.golden status            does each live project match its golden state?
-python -m scripts.golden restore all       put every project (and clear chat history and the activity feed) back to golden
-python -m scripts.golden restore halvane   one project
+python -m scripts.golden restore all --golden   put every demo project (and clear chat history and the activity feed) back to golden: use before a client demo
+python -m scripts.golden restore all       every project back to its latest checkpoint (its golden state if it has none); shows what it would lose and asks first
+python -m scripts.golden restore halvane   one project (--previous or --at 20261117-1015: an older checkpoint; --at before-restore undoes the last restore; --yes: do not ask)
+python -m scripts.golden checkpoints       the saved checkpoints;  checkpoint halvane: save one now
 python -m scripts.golden drop halvane      copy the ready-to-run file into its folder (what you do in front of a client)
 python -m scripts.rehearse_demo all        the whole demo for each project, then restore and verify
 python -m scripts.rehearse_demo halvane --runs 10   the same drop ten times (stability of what the model suggests)
@@ -28,6 +30,10 @@ python -m scripts.golden export halvane    save the live project as the new gold
 ```
 
 A restore does not undo Jira issues or calendar events. Rehearse with `PLAN_JIRA_SYNC=0` (forloop is the only project with a Jira key).
+
+**Checkpoints** (`apps/utils/checkpoints.py`, folder `checkpoints/`, local only): once a minute the API looks at every project; one that changed, has looked the same on two
+looks in a row, has no run in progress or failed, and passes the consistency checks becomes the project's newest checkpoint (the last 10 are kept). A plain `restore` goes back
+to it, so the work done on a project after the demo state is not lost. Golden is unchanged and is still the way back to the demo. Switch off with `CHECKPOINTS=0`.
 
 ## What is where
 - `<project>/golden.json` and `files/`: the export (rows of every table, the plan / meeting / timesheet files, a manifest of key numbers). Real email addresses are NOT in it:

@@ -18,7 +18,7 @@ from apps.graph import build_graph
 from apps.utils.raid_ai import suggest_raid_items_from_text
 from apps.utils.hours_budget_ai import suggest_budget_hours
 from apps.utils import clock
-from apps.utils import hours_import, plan_file, plan_merge, plan_starter, project_folders, timesheet_service, timesheet_watcher
+from apps.utils import checkpoints, hours_import, plan_file, plan_merge, plan_starter, project_folders, timesheet_service, timesheet_watcher
 from apps.utils.plan_export import build_plan_workbook
 from apps.db.plan_db import create_plan_task, list_plan_changes, plan_has_content, plan_summary, remove_plan_task, set_plan_baseline
 from apps.utils.hours import week_start as _week_start
@@ -149,6 +149,7 @@ def _startup():
     ensure_registers_schema()
     ensure_hours_schema()
     timesheet_watcher.start_watcher()
+    checkpoints.start_checkpointer()
     deleted = cleanup_old_jobs(max_age_hours=24)
     if deleted:
         logger.info(f"Startup cleanup: removed {deleted} stale job row(s)")

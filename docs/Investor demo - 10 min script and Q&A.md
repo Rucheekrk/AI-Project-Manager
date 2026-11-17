@@ -8,7 +8,7 @@ Anchor the whole demo on **halvane** (At risk). It has the best story and every 
 ## 0. Before you start (do these in order)
 
 1. `docker compose up -d`, then **restore** (clears chat, resets all four projects, puts the week-7 file back):
-   `docker compose exec api python -m scripts.golden restore all`
+   `docker compose exec api python -m scripts.golden restore all --golden` (type `yes` when it asks; plain `restore all` goes to the latest checkpoint, not the demo state)
 2. Open `localhost:3010`. Settings > Theme > **Dark** (the Forloop logo is pale; it shows best on dark). Browser zoom 100 to 110%, window wide (the three-column tiles get cramped on a small window).
 3. Close other tabs and notifications. Have these tabs ready: Dashboard, Workspace (halvane), Hours (halvane), AI Chat. **Registers is not shown** (manager's call: unfinished). Do not click it in the sidebar, and see the Dashboard note below.
 4. Do **not** click Approve on any meeting: it creates a real Google Calendar event and sends invites to Nirmal, Ram and Rucheek. Show it pending and say so.

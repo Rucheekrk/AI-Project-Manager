@@ -8,3 +8,4 @@ logs/
 .git/
 .claude/
 .DS_Store
+checkpoints/

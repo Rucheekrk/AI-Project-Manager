@@ -13,3 +13,4 @@ INTEGRATIONS.md
 projects/
 backups/
 datasets/golden/emails.local.json
+checkpoints/

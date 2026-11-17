@@ -115,26 +115,36 @@ def _show_emails(text: str) -> str:
 
 # ---------------------------------------------------------------- export
 
-def export_project(project_id: str, root=None, out_dir: Path = None) -> Path:
-    """Write datasets/golden/<id>/golden.json and files/ (the project's plan, meetings and timesheets folders)."""
+def collect_tables(project_id: str) -> dict:
+    """Every row of the project, read in one consistent snapshot, so a change made while this runs cannot show up half-way."""
+    conn = get_connection()
+    tables = {}
+    try:
+        conn.rollback()  # register_vector may have opened a transaction; the isolation level can only be set as the first statement of a new one
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            for t in PROJECT_TABLES:
+                names = [c for c in _columns(cur, t) if c != VECTOR_COLUMNS.get(t)]
+                cur.execute(f"SELECT {', '.join(names)} FROM {t} WHERE project_id = %s ORDER BY 1", (project_id,))
+                tables[t] = _jsonable(cur.fetchall())
+            task_ids = [r["task_id"] for r in tables["tasks"]]
+            deliverable_ids = [r["deliverable_id"] for r in tables["deliverables"]]
+            for t, col, parent in CHILD_TABLES:
+                ids = task_ids if parent == "tasks" else deliverable_ids
+                names = list(_columns(cur, t))
+                cur.execute(f"SELECT {', '.join(names)} FROM {t} WHERE {col} = ANY(%s::uuid[]) ORDER BY 1", (ids,))
+                tables[t] = _jsonable(cur.fetchall())
+    finally:
+        conn.close()
+    return tables
+
+
+def export_project(project_id: str, root=None, out_dir: Path = None, hide_emails: bool = True) -> Path:
+    """Write datasets/golden/<id>/golden.json and files/ (the project's plan, meetings and timesheets folders). hide_emails=False keeps the real
+    addresses in the file: only for a local copy that is never committed (checkpoints)."""
     root = Path(root or tw.ROOT)
     out_dir = Path(out_dir or GOLDEN_DIR / project_id)
-    conn = get_connection()
-    tables, cols = {}, {}
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        for t in PROJECT_TABLES:
-            names = [c for c in _columns(cur, t) if c != VECTOR_COLUMNS.get(t)]
-            cols[t] = names
-            cur.execute(f"SELECT {', '.join(names)} FROM {t} WHERE project_id = %s ORDER BY 1", (project_id,))
-            tables[t] = _jsonable(cur.fetchall())
-        task_ids = [r["task_id"] for r in tables["tasks"]]
-        deliverable_ids = [r["deliverable_id"] for r in tables["deliverables"]]
-        for t, col, parent in CHILD_TABLES:
-            ids = task_ids if parent == "tasks" else deliverable_ids
-            names = list(_columns(cur, t))
-            cur.execute(f"SELECT {', '.join(names)} FROM {t} WHERE {col} = ANY(%s::uuid[]) ORDER BY 1", (ids,))
-            tables[t] = _jsonable(cur.fetchall())
-    conn.close()
+    tables = collect_tables(project_id)
     data = {"format": FORMAT_VERSION, "project_id": project_id, "tables": tables, "manifest": manifest(project_id)}
     shutil.rmtree(out_dir / "files", ignore_errors=True)  # only what an export writes; the drop/ folder (the demo's ready-to-run file) is left alone
     (out_dir / "files").mkdir(parents=True)
@@ -144,7 +154,8 @@ def export_project(project_id: str, root=None, out_dir: Path = None) -> Path:
                 target = out_dir / "files" / path.relative_to(root / project_id)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(path, target)
-    (out_dir / "golden.json").write_text(_hide_emails(json.dumps(data, indent=1, sort_keys=True, default=str), tables["project_people"]) + "\n")
+    text = json.dumps(data, indent=1, sort_keys=True, default=str)
+    (out_dir / "golden.json").write_text((_hide_emails(text, tables["project_people"]) if hide_emails else text) + "\n")
     return out_dir / "golden.json"
 
 

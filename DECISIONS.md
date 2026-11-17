@@ -2328,3 +2328,38 @@ did connect: a 31B model writing a long JSON answer at ~11 tokens/s is slow, not
 `MEETING_COORDINATOR_MODEL` empty. (2) Those three jobs were measured to need gpt-4.1 (see the RAID and plan-suggestion comparisons); on Gemma or on the gpt-4o-mini fallback they are weaker, and the quality
 of Gemma on them is not measured yet. (3) The answer does not say which model wrote it; the switch is logged to `logs/app.log` ("using the fallback"). (4) `scripts/llm_probe.py` removes the fallback
 before it runs, so a dead server cannot pass by using the backup. `tests/unit/test_llm_fallback.py`.
+
+
+---
+
+## Checkpoints: a restore goes back to the last valid state, golden stays the demo state (2026-11-17)
+
+**Problem.** `restore` only knew the golden export, so every project run after the demo state (a 5th project's SOW, new timesheets, approved suggestions) was lost by a reset, and
+a project with no golden export (a 5th, a 6th) could not be restored at all, for instance after a Docker volume was lost (the manager's laptop, 2026-11-13).
+
+**Decision.** Two levels. **Golden** (`datasets/golden/`, in git) is unchanged and is the factory / client-demo state. **Checkpoints** (`checkpoints/<id>/<timestamp>/`, local, its own
+`.gitignore`, also in `.gitignore` and `.dockerignore`) are saved by the API on its own (`apps/utils/checkpoints.py`, a thread started next to the folder watcher; `CHECKPOINTS=0` switches it
+off). `restore <id|all>` now means "latest checkpoint, golden when there is none"; `--golden` is the old behaviour (and the only one that clears AI Chat and the activity feed);
+`--previous` / `--at <timestamp>` pick an older one. The same export/restore code is used (`export_project(out_dir=, hide_emails=False)`, `restore_project(golden_dir=)`), so a checkpoint
+restores exactly like a golden state. Checkpoints hold real email addresses (golden holds `<<email:Name>>`), so they are never committed. `restore all` covers every project that has a golden
+export OR a checkpoint, which is what brings a 5th project back after a lost volume (the folder is in the bind-mounted repo directory, not in Docker's volume).
+
+**When.** A polling loop, not a hook on job completion: only the SOW pipeline is a job; meetings, timesheets and plan files arrive through the folder watcher and UI edits are plain requests,
+so a hook would miss most changes. Every `CHECKPOINT_POLL_SECONDS` (60) each project with tasks is fingerprinted (every row plus the content of its plan / meetings / timesheets files). It is
+saved after TWO looks with the same new fingerprint (a run still writing has finished), so about 1 to 3 minutes after the last change. The last `CHECKPOINT_KEEP` (10) are kept.
+
+**What counts as valid** (`checkpoints.problems`, `_run_problem`, `_busy`). Not saved while: a reset is running or the watcher is reading a file; the project's latest run is running (or
+failed since the last checkpoint: a failed run may leave it half-updated; a later finished run clears that); the project has no tasks; a dependency, deliverable link or hours entry points
+outside the project (a restore would fail on it); or the project's reports (`golden.manifest`) cannot be worked out. Not built: "logged hours equal the sum of the entries" (not checked against the
+schema) and orphan rows (the foreign keys already stop them). A state can be valid and still wrong (the model made a bad suggestion that was approved): that is what the history
+(`--previous`, `--at`) is for. `checkpoint <id> --force` saves past the checks. Rows are read in one `REPEATABLE READ` snapshot and the fingerprint is compared again after the files are copied,
+so a copy that mixes two states is dropped.
+
+**Restoring is never automatic.** `scripts/golden.py restore` lists what it would lose (the same differences `verify` gives), asks for `yes` (no terminal and no `--yes` = it refuses), and
+saves the state it replaces as `before-restore` (one per project; `--at before-restore` undoes the restore). `rehearse_demo` calls `restore_project` directly and stays golden.
+**Found by the tests:** undoing from `before-restore` first overwrote `before-restore` with the current state and then restored that: `restore()` now reads from a copy.
+
+**Limits.** Jira issues, calendar events, chat history and the activity feed are not in a checkpoint (as for golden). A restore moves a waiting meeting to the next business day, which is a change,
+so a new checkpoint follows a restore. The checkpoint folder lives next to the repo on the same disk: it survives a lost Docker volume, not a deleted repo folder. The investor-demo script now uses
+`restore all --golden`. Not built: a restore button in the UI. `tests/db/test_checkpoints.py` (8 tests); the command-line flow was run end to end on a throwaway test-database project; on the live
+demo data the four projects were fingerprinted twice (stable) and each got its first checkpoint 2 minutes after the API started.
